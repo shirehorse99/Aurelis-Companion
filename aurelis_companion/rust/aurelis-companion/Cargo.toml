@@ -1,0 +1,33 @@
+[package]
+name = "aurelis-companion"
+version = "0.1.5"
+edition = "2021"
+description = "Aurelis Companion: an optional helper server for Aurelis TV boxes (Home Assistant add-on and Docker image)."
+
+[[bin]]
+name = "aurelis-companion"
+path = "src/main.rs"
+
+[dependencies]
+companion-protocol = { path = "../companion-protocol" }
+aurelis-heuristics = { path = "../aurelis-heuristics" }
+tokio = { workspace = true, features = ["io-util", "sync", "process"] }
+axum = { workspace = true }
+sysinfo = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+# gzip: ask providers for compressed guides and store them decompressed, as OkHttp would deliver them.
+# This crate only: no other workspace crate (and so not libaurelis_core) uses reqwest.
+reqwest = { workspace = true, features = ["gzip"] }
+futures-util = { workspace = true }
+tokio-util = { workspace = true }
+mdns-sd = "0.13"
+xmltv-parser = { path = "../xmltv-parser" }
+flate2 = "1.1"
+
+[dev-dependencies]
+tower = { workspace = true }

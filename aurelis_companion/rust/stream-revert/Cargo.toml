@@ -1,0 +1,12 @@
+[package]
+name = "stream-revert"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native twin of Aurelis's core/domain BestStreamRevertPolicy — when to return to the stream a poor-stream switch abandoned. Pure arithmetic, no I/O, no state."
+
+[lib]
+name = "stream_revert"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"

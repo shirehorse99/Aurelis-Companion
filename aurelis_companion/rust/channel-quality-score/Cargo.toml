@@ -1,0 +1,16 @@
+[package]
+name = "channel-quality-score"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native port of Aurelis's core/domain ChannelArbiter's per-variant quality/regional scoring heuristics (getQualityScore, detectAudioProfile, getRegionalBonus, regionalPreferenceTier, cymruNamingTier, ...), run over every stream variant on every playlist sync."
+
+[lib]
+name = "channel_quality_score"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+

@@ -1,0 +1,16 @@
+[package]
+name = "smart-collection"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native scoring primitives for Aurelis's core/domain SmartCollectionInteractor. Pure hash/date/dedupe helpers over caller-precomputed primitives, no long-lived state."
+
+[lib]
+name = "smart_collection"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+

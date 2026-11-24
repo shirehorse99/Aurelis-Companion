@@ -1,0 +1,44 @@
+[package]
+name = "aurelis-core"
+version = "0.1.0"
+edition = "2021"
+description = "Single cdylib that links all Aurelis Rust crates' JNI symbols into one .so"
+
+[lib]
+name = "aurelis_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { workspace = true }
+jni-cache = { path = "../jni-cache" }
+aurelis-heuristics = { path = "../aurelis-heuristics" }
+bitrate-calc = { path = "../bitrate-calc" }
+channel-audit-heuristics = { path = "../channel-audit-heuristics" }
+channel-merge = { path = "../channel-merge" }
+channel-quality-score = { path = "../channel-quality-score" }
+epg-artwork-heuristics = { path = "../epg-artwork-heuristics" }
+epg-channel-sort = { path = "../epg-channel-sort" }
+epg-grid = { path = "../epg-grid" }
+epg-matcher = { path = "../epg-matcher" }
+epg-store = { path = "../epg-store" }
+m3u-parser = { path = "../m3u-parser" }
+media-server-parser = { path = "../media-server-parser" }
+metoffice-parser = { path = "../metoffice-parser" }
+news-cluster = { path = "../news-cluster" }
+news-parser = { path = "../news-parser" }
+odds-matcher = { path = "../odds-matcher" }
+regional-channel-filter = { path = "../regional-channel-filter" }
+smart-collection = { path = "../smart-collection" }
+stream-revert = { path = "../stream-revert" }
+thematic-rail-matcher = { path = "../thematic-rail-matcher" }
+xmltv-parser = { path = "../xmltv-parser" }
+xtream-parser = { path = "../xtream-parser" }
+# Phase 4 crates
+title-matcher = { path = "../title-matcher" }
+tv-pick-quality = { path = "../tv-pick-quality" }
+news-matcher = { path = "../news-matcher" }
+subtitle-offset = { path = "../subtitle-offset" }
+sports-on-tv-linker = { path = "../sports-on-tv-linker" }
+sports-league-art = { path = "../sports-league-art" }
+xmltv-auto-mapper = { path = "../xmltv-auto-mapper" }
+companion-protocol = { path = "../companion-protocol", features = ["android-jni"] }

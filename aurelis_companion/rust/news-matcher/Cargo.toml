@@ -1,0 +1,15 @@
+[package]
+name = "news-matcher"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native news-channel matcher and breaking-news classifier for Aurelis's core/domain news logic. Pure text scoring, no network calls, no long-lived state."
+
+[lib]
+name = "news_matcher"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"

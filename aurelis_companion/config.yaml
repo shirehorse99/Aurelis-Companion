@@ -1,0 +1,45 @@
+name: "Aurelis Companion"
+slug: aurelis_companion
+version: "0.1.5"
+description: "A helper server for Aurelis TV boxes: shares AI answers and guide downloads across your household."
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+homeassistant_api: true
+# The binary is PID 1 and handles SIGTERM, so no init wrapper.
+init: false
+ingress: true
+ingress_port: 8765
+panel_icon: mdi:television-play
+panel_title: "Aurelis Companion"
+# Host networking so televisions can find the Companion by mDNS and reach port 8765 directly.
+host_network: true
+# Leave the master's sealed household settings and the guide addresses (which may carry IPTV logins)
+# out of Home Assistant backups. Patterns are globs inside the add-on's /data folder, as in the add-on
+# reference's own examples (`cache/*`). The household secret (household.json) is still backed up, so
+# a restored Companion stays paired: encrypt your backups (see DOCS.md).
+backup_exclude:
+  - "household/*"
+  - "guide_sources.json"
+# So picture_dir can point at /share/... or /media/...
+map:
+  - share:rw
+  - media:rw
+# These match the Companion's own settings reader exactly (rust/aurelis-companion/src/config.rs).
+# "" is read as not set, and disk_budget_mb 0 means automatic.
+options:
+  pictures: false
+  picture_dir: ""
+  disk_budget_mb: 0
+  ai_runner: true
+  betfair_relay: true
+  tuner: true
+schema:
+  pictures: bool
+  picture_dir: str?
+  disk_budget_mb: int(0,)
+  ai_runner: bool
+  betfair_relay: bool
+  tuner: bool

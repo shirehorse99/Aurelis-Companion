@@ -1,0 +1,15 @@
+[package]
+name = "image-decode"
+version = "0.1.0"
+edition = "2021"
+description = "Native logo/poster decode + NEON-SIMD downscale + PNG re-encode for Aurelis (WS-IMG, see docs/performance/NATIVE_SPEED_WINS_PLAN.md). Pure-Rust codecs, no C build surface."
+
+[lib]
+name = "image_decode"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = { workspace = true }
+jni-cache = { path = "../jni-cache" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+fast_image_resize = "6"

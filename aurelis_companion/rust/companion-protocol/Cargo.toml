@@ -1,0 +1,27 @@
+[package]
+name = "companion-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Aurelis Companion wire protocol: household sealing (v3), framed streams (v4), request proof and card types. Shared by the Companion server and the TV app's native library."
+
+[lib]
+name = "companion_protocol"
+crate-type = ["rlib"]
+
+[dependencies]
+aes-gcm = { workspace = true }
+pbkdf2 = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+spake2 = { workspace = true }
+jni = { workspace = true, optional = true }
+
+[features]
+# JNI exports for the television app. Off for the Companion server binary, which must not pull jni.
+android-jni = ["dep:jni"]
+
+[dev-dependencies]
+base64 = { workspace = true }

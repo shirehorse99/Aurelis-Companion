@@ -1,0 +1,15 @@
+[package]
+name = "thematic-rail-matcher"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native scoring engine for Aurelis's core/domain ThematicRailMatcher and SeriesThematicRailMatcher. Pure scoring over caller-precomputed primitives, no long-lived state."
+
+[lib]
+name = "thematic_rail_matcher"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

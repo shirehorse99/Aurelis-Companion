@@ -1,0 +1,15 @@
+[package]
+name = "news-parser"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native JSON body parse engine for Aurelis's core/data GeneralNewsRepository. Pure parse-only over an already-fetched HTTP response body, no network calls, no long-lived state."
+
+[lib]
+name = "news_parser"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

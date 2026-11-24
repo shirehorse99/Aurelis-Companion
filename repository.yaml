@@ -1,0 +1,4 @@
+# Home Assistant add-on repository file.
+name: "Aurelis Companion add-ons"
+url: "https://github.com/shirehorse99/Aurelis-Companion"
+maintainer: "shirehorse99 <shirehorse99@users.noreply.github.com>"

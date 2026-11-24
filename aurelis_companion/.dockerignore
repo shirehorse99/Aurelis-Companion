@@ -1,0 +1,4 @@
+rust/target
+**/target
+**/*.so
+**/jniLibs

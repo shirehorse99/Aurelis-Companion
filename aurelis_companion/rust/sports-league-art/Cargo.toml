@@ -1,0 +1,19 @@
+[package]
+name = "sports-league-art"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native sport-detection / league-search-query scoring helpers for Aurelis's core/data SportsLeagueArtResolver. Pure text compute over a programme title, no network calls, no long-lived state."
+
+[lib]
+name = "sports_league_art"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+
+# Standalone crate — not a member of the parent rust/Cargo.toml workspace.
+# This empty [workspace] table makes cargo treat this directory as its own
+# workspace root so `cargo test` works without modifying rust/Cargo.toml.

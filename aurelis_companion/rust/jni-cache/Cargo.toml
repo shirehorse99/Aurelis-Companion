@@ -1,0 +1,11 @@
+[package]
+name = "jni-cache"
+version = "0.1.0"
+edition = "2021"
+description = "Shared JNI handle cache + zero-copy direct-buffer helpers for Aurelis's native crates (WS-JNI, see docs/performance/NATIVE_SPEED_WINS_PLAN.md)."
+
+[lib]
+name = "jni_cache"
+
+[dependencies]
+jni = { workspace = true }

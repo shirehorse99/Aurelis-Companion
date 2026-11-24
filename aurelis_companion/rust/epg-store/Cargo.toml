@@ -1,0 +1,12 @@
+[package]
+name = "epg-store"
+version = "0.1.0"
+edition = "2021"
+description = "Packed mmap EPG sidecar for Guide viewport queries. Twin of EpgPackedStore.kt."
+
+[lib]
+name = "epg_store"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = { workspace = true }

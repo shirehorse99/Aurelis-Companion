@@ -1,0 +1,13 @@
+[package]
+name = "subtitle-offset"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native SRT subtitle timestamp shifter for Aurelis's core/domain SubtitleOffsetLogic. Pure text crunching, no I/O, no long-lived state."
+
+[lib]
+name = "subtitle_offset"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+regex = "1"

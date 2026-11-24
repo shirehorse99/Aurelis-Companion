@@ -1,0 +1,19 @@
+[package]
+name = "channel-merge"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native channel-grouping engine for Aurelis's ChannelArbiter.buildChannelGroups. Pure grouping over caller-precomputed strings, no long-lived state."
+
+[lib]
+name = "channel_merge"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aurelis-heuristics = { path = "../aurelis-heuristics" }
+channel-quality-score = { path = "../channel-quality-score" }
+regional-channel-filter = { path = "../regional-channel-filter" }
+rayon = { workspace = true }
+

@@ -1,0 +1,18 @@
+[package]
+name = "epg-matcher"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native EPG-to-channel matching/merge engine for Aurelis's core/domain EpgInteractor + EpgMultiSourceMerge. Pure matching/interval-merge over caller-precomputed strings, no long-lived state."
+
+[lib]
+name = "epg_matcher"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aurelis-heuristics = { path = "../aurelis-heuristics" }
+jni-cache = { path = "../jni-cache" }
+rayon = { workspace = true }
+

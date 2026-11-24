@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "aurelis-core",
+    "aurelis-heuristics",
+    "jni-cache",
+    "bitrate-calc",
+    "channel-audit-heuristics",
+    "channel-merge",
+    "channel-quality-score",
+    "epg-artwork-heuristics",
+    "epg-channel-sort",
+    "epg-grid",
+    "epg-matcher",
+    "epg-store",
+    "image-decode",
+    "m3u-parser",
+    "media-server-parser",
+    "metoffice-parser",
+    "news-cluster",
+    "news-parser",
+    "odds-matcher",
+    "regional-channel-filter",
+    "smart-collection",
+    "stream-revert",
+    "thematic-rail-matcher",
+    "xmltv-parser",
+    "xmltv-auto-mapper",
+    "xtream-parser",
+    # Phase 4 crates
+    "title-matcher",
+    "tv-pick-quality",
+    "news-matcher",
+    "subtitle-offset",
+    "sports-on-tv-linker",
+    "sports-league-art",
+    "companion-protocol",
+    "aurelis-companion",
+]
+
+[workspace.dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+quick-xml = "0.42"
+unicode-normalization = "0.1"
+sha1 = "0.11"
+rayon = "1"
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+spake2 = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "signal"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system", "disk"] }
+
+[profile.release]
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

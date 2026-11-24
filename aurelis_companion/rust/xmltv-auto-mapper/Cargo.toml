@@ -1,0 +1,19 @@
+[package]
+name = "xmltv-auto-mapper"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native channel→XMLTV-EPG-id auto-mapping helpers for Aurelis's core/data XmltvAutoMapper. Pure string compute over channel names and EPG id lists, no DB/DAO access, no long-lived state."
+
+[lib]
+name = "xmltv_auto_mapper"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+
+# Standalone crate — not a member of the parent rust/Cargo.toml workspace.
+# This empty [workspace] table makes cargo treat this directory as its own
+# workspace root so `cargo test` works without modifying rust/Cargo.toml.

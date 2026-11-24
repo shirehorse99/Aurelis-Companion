@@ -1,0 +1,15 @@
+[package]
+name = "epg-grid"
+version = "0.1.0"
+edition = "2021"
+description = "Optional native compute engine for Aurelis's EPG grid (ROBUST_EPG_V2_PLAN.md Phase 5). Pure culling/geometry math only -- no UI, no drawing, no long-lived state."
+
+[lib]
+name = "epg_grid"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
