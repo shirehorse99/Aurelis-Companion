@@ -241,8 +241,8 @@ async fn ui_save_channel_override(
 
 fn safe_lineup_redirect(raw: Option<&String>) -> String {
     match raw.map(|s| s.trim()) {
-        Some("lineup") => "lineup".to_string(),
-        Some(s) if s.starts_with("lineup?") && !s.contains('\r') && !s.contains('\n') => s.to_string(),
+        Some("lineup") => "../lineup".to_string(),
+        Some(s) if s.starts_with("lineup?") && !s.contains('\r') && !s.contains('\n') => format!("../{s}"),
         _ => "../".to_string(),
     }
 }
