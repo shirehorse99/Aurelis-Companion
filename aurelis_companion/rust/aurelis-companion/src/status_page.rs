@@ -63,7 +63,7 @@ pub fn render(view: &PageView, operator: bool) -> String {
 
     h.push_str("<nav class=\"nav-tabs\">");
     h.push_str("<a href=\"./\" class=\"nav-tab active\">System Status</a>");
-    h.push_str("<a href=\"lineup\" class=\"nav-tab\">Channel Lineup</a>");
+    h.push_str("<a href=\"lineup\" class=\"nav-tab\">Channels</a>");
     h.push_str("</nav>");
 
     let state_line = match &c.busy_reason {
@@ -125,7 +125,7 @@ pub fn render(view: &PageView, operator: bool) -> String {
         if view.devices.is_empty() {
             h.push_str("<p>No devices have checked in since Companion started.</p>");
         } else {
-            h.push_str("<table><tr><th>Device</th><th>Network</th><th>Last Aurelis check-in (UTC)</th></tr>");
+            h.push_str("<table><tr><th>Device</th><th>Network</th><th>Lineup sync</th><th>Last Aurelis check-in (UTC)</th></tr>");
             let mut devices = view.devices.iter().collect::<Vec<_>>();
             devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen_ms));
             for device in devices {
@@ -134,7 +134,18 @@ pub fn render(view: &PageView, operator: bool) -> String {
                     crate::state::DeviceReachability::NoReply => "No ping reply",
                     crate::state::DeviceReachability::Unknown => "Unknown",
                 };
-                h.push_str(&format!("<tr><td>{}</td><td>{network}</td><td><time>{}</time></td></tr>",
+                let sync_cell = match (device.synced_lineup_etag.as_deref(), device.last_lineup_sync_ms) {
+                    (Some(etag), Some(ts)) if etag == view.lineup_etag => format!(
+                        "<span class=\"badge done\">Up to date</span> <span class=\"job-meta\">{} ago</span>",
+                        age(view.now_ms, ts.max(0) as u64)
+                    ),
+                    (Some(_), Some(ts)) => format!(
+                        "<span class=\"badge pending\">Pending sync</span> <span class=\"job-meta\">{} ago</span>",
+                        age(view.now_ms, ts.max(0) as u64)
+                    ),
+                    _ => "<span class=\"job-meta\">Not synced yet</span>".to_string(),
+                };
+                h.push_str(&format!("<tr><td>{}</td><td>{network}</td><td>{sync_cell}</td><td><time>{}</time></td></tr>",
                     escape(&device.name), crate::guide_store::iso_utc(device.last_seen_ms)));
             }
             h.push_str("</table>");
@@ -304,7 +315,7 @@ pub fn render(view: &PageView, operator: bool) -> String {
 
     h.push_str("</section><section><h2>Channel Lineup & Household Overrides</h2>");
     h.push_str(&format!("<p>Total channels known: <strong>{}</strong> · Active overrides: <strong>{}</strong></p>", view.lineup_channels_count, view.lineup_overrides_count));
-    h.push_str("<p><a href=\"lineup\" class=\"nav-tab active\" style=\"display:inline-block; font-size: 0.95rem;\">Open Full Channel Lineup Editor →</a></p>");
+    h.push_str("<p><a href=\"lineup\" class=\"nav-tab active\" style=\"display:inline-block; font-size: 0.95rem;\">Open the channel editor →</a></p>");
 
     h.push_str("</section><section><h2>Pause</h2>");
     let (to, label, note) = if view.paused {
@@ -323,11 +334,101 @@ pub fn render(view: &PageView, operator: bool) -> String {
     h
 }
 
+fn sports_folder_label(folder: &str) -> String {
+    folder.replace("::", " / ")
+}
+
+/// Stable, HTML-safe anchor id for a channel row (used to scroll back after Save/Move).
+pub fn row_anchor_id(channel_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(channel_id.as_bytes());
+    let mut out = String::with_capacity(19);
+    out.push_str("ch-");
+    for b in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+/// Compact pagination window: always includes first, last, and `current - 2 ..= current + 2`.
+fn windowed_pages(current: usize, total: usize) -> Vec<Option<usize>> {
+    if total <= 9 {
+        return (1..=total).map(Some).collect();
+    }
+    let mut pages = Vec::new();
+    let start = current.saturating_sub(2).max(2);
+    let end = (current + 2).min(total - 1);
+    pages.push(Some(1));
+    if start > 2 {
+        pages.push(None);
+    }
+    for p in start..=end {
+        pages.push(Some(p));
+    }
+    if end < total - 1 {
+        pages.push(None);
+    }
+    pages.push(Some(total));
+    pages
+}
+
+fn render_group_dropdown(
+    out: &mut String,
+    form: &str,
+    name_suffix: &str,
+    selected: Option<&str>,
+    selected_folder: Option<&str>,
+    automatic: &str,
+    sports_folders: &std::collections::BTreeSet<String>,
+    include_sports_folders: bool,
+) {
+    let keys = selected.map(|value| {
+        value.split(',').filter_map(crate::lineup::aurelis_group_key).collect::<Vec<_>>().join(",")
+    }).unwrap_or_default();
+    out.push_str(&format!("<select {form} name=\"aurelis_group{name_suffix}\" aria-label=\"Aurelis group\">"));
+    out.push_str(&format!("<option value=\"\"{}>{}</option>",
+        if keys.is_empty() && selected_folder.is_none() { " selected" } else { "" }, escape(automatic)));
+    if keys.contains(',') {
+        out.push_str(&format!("<option value=\"{}\" selected>Keep current groups</option>", escape(&keys)));
+    }
+    for &(key, label) in crate::lineup::AURELIS_GROUPS {
+        let selected = if key == keys && selected_folder.is_none() { " selected" } else { "" };
+        out.push_str(&format!("<option value=\"{key}\"{selected}>{label}</option>"));
+    }
+    if include_sports_folders && !sports_folders.is_empty() {
+        out.push_str("<optgroup label=\"Sports Extra folders\">");
+        for folder in sports_folders {
+            let selected = if selected_folder == Some(folder.as_str()) { " selected" } else { "" };
+            out.push_str(&format!("<option value=\"SPORT_EXTRA::{}\"{selected}>{}</option>",
+                escape(folder), escape(&sports_folder_label(folder))));
+        }
+        out.push_str("</optgroup>");
+    } else if let Some(folder) = selected_folder {
+        // Keep the channel's currently assigned Sports Extra folder selected without repeating all folders per row.
+        out.push_str(&format!(
+            "<option value=\"SPORT_EXTRA::{}\" selected>Sports Extra / {}</option>",
+            escape(folder), escape(&sports_folder_label(folder))
+        ));
+    }
+    out.push_str("</select>");
+}
+
 pub fn render_lineup(
-    _view: &PageView,
+    view: &PageView,
     lineup: &crate::lineup::LineupStore,
     operator: bool,
     query: &crate::lineup::ChannelQuery,
+) -> String {
+    render_lineup_with_flash(view, lineup, operator, query, None)
+}
+
+pub fn render_lineup_with_flash(
+    view: &PageView,
+    lineup: &crate::lineup::LineupStore,
+    operator: bool,
+    query: &crate::lineup::ChannelQuery,
+    flash: Option<&crate::state::FlashNotice>,
 ) -> String {
     let mut h = String::new();
     h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
@@ -340,8 +441,17 @@ pub fn render_lineup(
 
     h.push_str("<nav class=\"nav-tabs\">");
     h.push_str("<a href=\"./\" class=\"nav-tab\">System Status</a>");
-    h.push_str("<a href=\"lineup\" class=\"nav-tab active\">Channel Lineup</a>");
+    h.push_str("<a href=\"lineup\" class=\"nav-tab\">Channels</a>");
+    h.push_str("<a href=\"lineup?view=table\" class=\"nav-tab active\">Spreadsheet view</a>");
     h.push_str("</nav>");
+
+    if let Some(notice) = flash {
+        let (cls, role) = match notice.kind {
+            crate::state::FlashKind::Success => ("notice ok", "status"),
+            crate::state::FlashKind::Error => ("notice err", "alert"),
+        };
+        h.push_str(&format!("<div class=\"{cls}\" role=\"{role}\">{}</div>", escape(&notice.message)));
+    }
 
     let mut channels = lineup.get_channels();
     let total_count = channels.len();
@@ -349,34 +459,54 @@ pub fn render_lineup(
 
     let mut countries = std::collections::BTreeSet::new();
     let mut categories = std::collections::BTreeSet::new();
+    let mut sports_folders = std::collections::BTreeSet::new();
+    let mut group_counts = std::collections::HashMap::<crate::lineup::DialGroup, usize>::new();
+    let mut group_positions = std::collections::HashMap::new();
     for ch in &channels {
         if let Some(cc) = ch.country_code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            countries.insert(cc.to_uppercase());
+            let normalized = crate::lineup::dial_country(Some(cc));
+            if normalized != "UNKNOWN" {
+                countries.insert(normalized);
+            }
         }
-        if let Some(g) = ch.genre.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(g) = ch.original_genre.as_deref().or(ch.genre.as_deref()).map(str::trim).filter(|s| !s.is_empty()) {
             categories.insert(g.to_string());
         }
+        if let Some(folder) = ch.sports_extra_group.as_deref() {
+            sports_folders.insert(folder.to_owned());
+            if let Some((parent, _)) = folder.split_once("::") {
+                sports_folders.insert(parent.to_owned());
+            }
+        }
+        let group = crate::lineup::dial_group(ch);
+        let count = group_counts.entry(group).or_default();
+        *count += 1;
+        group_positions.insert(ch.id.clone(), *count);
     }
 
-    if let Some(c) = query.country.as_deref().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()) {
-        channels.retain(|ch| ch.country_code.as_deref().map(|cc| cc.to_uppercase()) == Some(c.clone()));
+    if let Some(c) = query.country.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let target = crate::lineup::dial_country(Some(c));
+        channels.retain(|ch| crate::lineup::dial_country(ch.country_code.as_deref()) == target);
     }
     if let Some(cat) = query.category.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         channels.retain(|ch| crate::lineup::matches_category_filter(ch, cat));
     }
     if let Some(q) = query.search.as_deref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
-        channels.retain(|ch| {
-            ch.name.to_lowercase().contains(&q)
-                || ch.id.to_lowercase().contains(&q)
-                || ch.genre.as_deref().map(|g| g.to_lowercase().contains(&q)).unwrap_or(false)
-        });
+        channels.retain(|ch| crate::lineup::matches_search_filter(ch, &q));
     }
     if query.edited_only {
         channels.retain(|ch| lineup.get_override(&ch.id).is_some());
     }
+    if query.hidden_only {
+        channels.retain(|ch| ch.hidden == Some(true));
+    }
+    if query.unnumbered_only {
+        channels.retain(|ch| ch.channel_number.is_none());
+    }
+    lineup.sort_channels(&mut channels, query.sort.as_deref());
 
     let page_href = |p: Option<usize>| -> String {
-        let mut params: Vec<String> = Vec::new();
+        let mut params: Vec<String> = vec!["view=table".to_string()];
         if let Some(s) = query.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             params.push(format!("search={}", url_encode_query_val(s)));
         }
@@ -389,14 +519,19 @@ pub fn render_lineup(
         if query.edited_only {
             params.push("edited=true".to_string());
         }
+        if query.hidden_only {
+            params.push("hidden=true".to_string());
+        }
+        if query.unnumbered_only {
+            params.push("unnumbered=true".to_string());
+        }
+        if let Some(sort) = query.sort.as_deref().filter(|s| !s.is_empty()) {
+            params.push(format!("sort={}", url_encode_query_val(sort)));
+        }
         if let Some(page_num) = p {
             params.push(format!("page={page_num}"));
         }
-        if params.is_empty() {
-            "lineup".to_string()
-        } else {
-            format!("lineup?{}", params.join("&"))
-        }
+        format!("lineup?{}", params.join("&"))
     };
 
     const PER_PAGE: usize = 100;
@@ -405,7 +540,8 @@ pub fn render_lineup(
     let current_page = query.page.unwrap_or(1).clamp(1, total_pages);
     let current_redirect = page_href(if current_page > 1 { Some(current_page) } else { None });
 
-    h.push_str("<section><h2>Household Channel Lineup & Numbering</h2>");
+    h.push_str("<section class=\"lineup-tools\"><h2>Spreadsheet view</h2>");
+    h.push_str("<p><strong>For bulk changes and backups.</strong> To order channels and see them as the televisions do, use <a href=\"lineup\">Channels</a>.</p>");
     h.push_str("<p>Manage household channel assignments, permanent country/category moves, and dial numbers across all Aurelis TV boxes.</p>");
     h.push_str("<div class=\"stats-row\">");
     h.push_str(&format!("<span class=\"stat-chip\">Channels reported: <strong>{total_count}</strong></span>"));
@@ -413,31 +549,69 @@ pub fn render_lineup(
     h.push_str(&format!("<span class=\"stat-chip\">Matching filter: <strong>{total}</strong></span>"));
     h.push_str("</div>");
 
+    if !view.devices.is_empty() {
+        let mut devices = view.devices.iter().collect::<Vec<_>>();
+        devices.sort_by_key(|device| std::cmp::Reverse(device.last_seen_ms));
+        h.push_str("<div class=\"sync-strip\" aria-label=\"TV lineup sync status\">");
+        h.push_str("<span class=\"job-meta\">TV sync:</span>");
+        for device in devices {
+            let (cls, state_label, suffix) = match (device.synced_lineup_etag.as_deref(), device.last_lineup_sync_ms) {
+                (Some(etag), Some(ts)) if etag == view.lineup_etag => (
+                    "done",
+                    "Up to date",
+                    format!(" · {} ago", age(view.now_ms, ts.max(0) as u64)),
+                ),
+                (Some(_), Some(ts)) => (
+                    "pending",
+                    "Pending",
+                    format!(" · {} ago", age(view.now_ms, ts.max(0) as u64)),
+                ),
+                _ => ("pending", "Not synced", String::new()),
+            };
+            h.push_str(&format!(
+                "<span class=\"sync-chip\"><strong>{}</strong><span class=\"badge {cls}\">{state_label}</span><span class=\"job-meta\">{suffix}</span></span>",
+                escape(&device.name),
+            ));
+        }
+        h.push_str("</div>");
+    }
+
     if operator {
         h.push_str("<datalist id=\"country-list\">");
         for c in &countries {
             h.push_str(&format!("<option value=\"{}\">", escape(c)));
         }
         h.push_str("</datalist>");
-        h.push_str("<datalist id=\"category-list\">");
-        for acat in crate::lineup::all_aurelis_categories() {
-            h.push_str(&format!("<option value=\"{}\">", escape(acat)));
-        }
-        for cat in &categories {
-            if !crate::lineup::all_aurelis_categories().iter().any(|a| a.eq_ignore_ascii_case(cat)) {
-                h.push_str(&format!("<option value=\"{}\">", escape(cat)));
-            }
+        h.push_str("<datalist id=\"sports-folder-list\">");
+        for folder in &sports_folders {
+            h.push_str(&format!("<option value=\"{}\">", escape(folder)));
         }
         h.push_str("</datalist>");
-
-        h.push_str("<details style=\"margin-top: 0.75rem;\"><summary>Auto-Assign Channel Numbers per Country Group</summary>");
+        h.push_str("<details style=\"margin-top: 0.75rem;\"><summary>Auto-Assign Dial Numbers by Aurelis Group</summary>");
         h.push_str("<form method=\"post\" action=\"ui/assign_numbers\" style=\"margin-top: 0.5rem;\">");
         h.push_str(&format!("<input type=\"hidden\" name=\"redirect_to\" value=\"{}\">", escape(&current_redirect)));
-        h.push_str("<fieldset><legend>Country Numbering Plan</legend>");
-        h.push_str("<label>Country: <input type=\"text\" name=\"country_code\" list=\"country-list\" placeholder=\"GB\" size=\"5\"></label> ");
+        h.push_str("<fieldset><legend>Group Numbering Plan</legend>");
+        let country = query.country.as_deref().unwrap_or_default();
+        h.push_str(&format!("<label>Country <input type=\"text\" name=\"country_code\" list=\"country-list\" value=\"{}\" placeholder=\"All countries\"></label>", escape(country)));
+        let filter = query.category.as_deref().unwrap_or_default();
+        let dial_folder = filter.strip_prefix("SPORT_EXTRA::").filter(|folder| sports_folders.contains(*folder));
+        let dial_group = if dial_folder.is_some() {
+            Some("SPORT_EXTRA")
+        } else {
+            crate::lineup::aurelis_group_key(filter.strip_prefix("AURELIS::").unwrap_or(filter))
+        };
+        h.push_str("<label>Aurelis group");
+        render_group_dropdown(&mut h, "", "", dial_group, dial_folder, "Each group separately", &sports_folders, true);
+        h.push_str("</label>");
+        h.push_str("<label>Order <select name=\"order\">");
+        for &(key, label) in crate::lineup::ASSIGN_ORDERS {
+            h.push_str(&format!("<option value=\"{key}\">{}</option>", escape(label)));
+        }
+        h.push_str("</select></label>");
         h.push_str("<label>Start #: <input type=\"number\" name=\"start_number\" placeholder=\"101\" size=\"5\"></label> ");
         h.push_str("<label><input type=\"checkbox\" name=\"overwrite\" value=\"true\"> Overwrite existing numbers</label> ");
         h.push_str("<button type=\"submit\" class=\"btn-save\">Auto-Assign Numbers</button>");
+        h.push_str("<small>Keep the current order renumbers without moving anything. Name A to Z re-sorts the whole group.</small>");
         h.push_str("</fieldset></form></details>");
 
         h.push_str("<details style=\"margin-top: 0.5rem;\"><summary>Add / Move Channel Override by ID</summary>");
@@ -447,22 +621,40 @@ pub fn render_lineup(
         h.push_str("<label>Channel ID: <input type=\"text\" name=\"channel_id\" required placeholder=\"channel id\"></label> ");
         h.push_str("<label>Name: <input type=\"text\" name=\"display_name\" placeholder=\"Display Name\"></label> ");
         h.push_str("<label>Country: <input type=\"text\" name=\"country_code\" list=\"country-list\" placeholder=\"GB\" size=\"5\"></label> ");
-        h.push_str("<label>Category: <input type=\"text\" name=\"category\" list=\"category-list\" placeholder=\"Entertainment\"></label> ");
+        h.push_str("<label>Aurelis group ");
+        render_group_dropdown(&mut h, "", "", None, None, "Automatic", &sports_folders, true);
+        h.push_str("</label>");
         h.push_str("<label>Number: <input type=\"number\" name=\"channel_number\" placeholder=\"101\" size=\"5\"></label> ");
+        h.push_str("<label>Channel logo URL <input type=\"url\" name=\"logo_url\" placeholder=\"Provider logo\"></label>");
         h.push_str("<label><input type=\"checkbox\" name=\"hidden\" value=\"true\"> Hide</label> ");
         h.push_str("<button type=\"submit\" class=\"btn-save\">Save Override</button>");
         h.push_str("</fieldset></form></details>");
+
+        h.push_str("<details style=\"margin-top: 0.5rem;\"><summary>Backup &amp; Restore Overrides (JSON)</summary>");
+        h.push_str("<div class=\"import-box\">");
+        h.push_str(&format!(
+            "<div><a href=\"ui/export_overrides\" class=\"btn-secondary\">Export Overrides JSON ({overrides_count})</a></div>"
+        ));
+        h.push_str("<form method=\"post\" action=\"ui/import_overrides\" class=\"import-box\">");
+        h.push_str(&format!("<input type=\"hidden\" name=\"redirect_to\" value=\"{}\">", escape(&current_redirect)));
+        h.push_str("<label>Paste exported overrides JSON<textarea name=\"overrides_json\" rows=\"4\" placeholder='{ \"version\": 1, \"overrides\": [...] }'></textarea></label>");
+        h.push_str("<div class=\"import-controls\">");
+        h.push_str("<label>Import mode <select name=\"import_mode\"><option value=\"merge\">Merge with existing overrides</option><option value=\"replace\">Replace all existing overrides</option></select></label>");
+        h.push_str("<button type=\"submit\" class=\"btn-save\">Import Overrides</button>");
+        h.push_str("</div></form></div></details>");
     }
 
     h.push_str("</section>");
 
     // Filter bar
     let search_val = query.search.as_deref().unwrap_or("");
-    let country_val = query.country.as_deref().unwrap_or("").trim().to_uppercase();
+    let country_val = query.country.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        .map(|s| crate::lineup::dial_country(Some(s)))
+        .unwrap_or_default();
     let cat_val = query.category.as_deref().unwrap_or("").trim();
 
-    h.push_str("<form method=\"get\" action=\"lineup\" class=\"filter-bar\">");
-    h.push_str(&format!("<label>Search: <input type=\"text\" name=\"search\" value=\"{}\" placeholder=\"Name or ID\"></label>", escape(search_val)));
+    h.push_str("<form method=\"get\" action=\"lineup\" class=\"filter-bar\"><input type=\"hidden\" name=\"view\" value=\"table\">");
+    h.push_str(&format!("<label>Search: <input type=\"text\" name=\"search\" value=\"{}\" placeholder=\"Name, dial #, ID, or folder\"></label>", escape(search_val)));
 
     h.push_str("<label>Country: <select name=\"country\">");
     h.push_str("<option value=\"\">All Countries</option>");
@@ -475,14 +667,24 @@ pub fn render_lineup(
     h.push_str("<label>Category: <select name=\"category\">");
     h.push_str("<option value=\"\">All Categories</option>");
     h.push_str("<optgroup label=\"Aurelis Categories\">");
-    for acat in crate::lineup::all_aurelis_categories() {
-        let sel = if acat.eq_ignore_ascii_case(cat_val) { " selected" } else { "" };
-        h.push_str(&format!("<option value=\"{}\"{sel}>{}</option>", escape(acat), escape(acat)));
+    for &(key, label) in crate::lineup::AURELIS_GROUPS {
+        let value = format!("AURELIS::{key}");
+        let selected = if value == cat_val || label.eq_ignore_ascii_case(cat_val) { " selected" } else { "" };
+        h.push_str(&format!("<option value=\"{value}\"{selected}>{}</option>", escape(label)));
     }
     h.push_str("</optgroup>");
+    if !sports_folders.is_empty() {
+        h.push_str("<optgroup label=\"Sports Extra folders\">");
+        for folder in &sports_folders {
+            let value = format!("SPORT_EXTRA::{folder}");
+            let selected = if value == cat_val { " selected" } else { "" };
+            h.push_str(&format!("<option value=\"{}\"{selected}>{}</option>", escape(&value), escape(&sports_folder_label(folder))));
+        }
+        h.push_str("</optgroup>");
+    }
     h.push_str("<optgroup label=\"Provider Categories\">");
     for cat in &categories {
-        if crate::lineup::all_aurelis_categories().iter().any(|a| a.eq_ignore_ascii_case(cat)) {
+        if crate::lineup::AURELIS_GROUPS.iter().any(|&(_, label)| label.eq_ignore_ascii_case(cat)) {
             continue;
         }
         let sel = if cat.eq_ignore_ascii_case(cat_val) { " selected" } else { "" };
@@ -492,9 +694,20 @@ pub fn render_lineup(
     h.push_str("</select></label>");
 
     let edited_checked = if query.edited_only { " checked" } else { "" };
+    let hidden_checked = if query.hidden_only { " checked" } else { "" };
+    let unnumbered_checked = if query.unnumbered_only { " checked" } else { "" };
+    h.push_str("<label>Sort: <select name=\"sort\">");
+    let sort_val = query.sort.as_deref().unwrap_or("");
+    for &(key, label) in crate::lineup::LIST_SORTS {
+        let selected = if key == sort_val { " selected" } else { "" };
+        h.push_str(&format!("<option value=\"{key}\"{selected}>{}</option>", escape(label)));
+    }
+    h.push_str("</select></label>");
     h.push_str(&format!("<label><input type=\"checkbox\" name=\"edited\" value=\"true\"{edited_checked}> Edited only</label>"));
+    h.push_str(&format!("<label><input type=\"checkbox\" name=\"hidden\" value=\"true\"{hidden_checked}> Hidden only</label>"));
+    h.push_str(&format!("<label><input type=\"checkbox\" name=\"unnumbered\" value=\"true\"{unnumbered_checked}> Unnumbered only</label>"));
     h.push_str("<button type=\"submit\" class=\"btn-save\">Filter</button>");
-    h.push_str("<a href=\"lineup\" class=\"nav-tab\" style=\"padding: 0.3rem 0.6rem;\">Clear</a>");
+    h.push_str("<a href=\"lineup?view=table\" class=\"nav-tab\" style=\"padding: 0.3rem 0.6rem;\">Clear</a>");
     h.push_str("</form>");
 
     h.push_str("<section>");
@@ -515,13 +728,18 @@ pub fn render_lineup(
                 total_pages
             ));
             if total_pages > 1 {
-                buf.push_str("<nav class=\"pager-links\">");
+                buf.push_str("<nav class=\"pager-links\" aria-label=\"Pagination\">");
                 if current_page > 1 {
                     buf.push_str(&format!("<a href=\"{}\" class=\"nav-tab\">← Prev</a>", escape(&page_href(Some(current_page - 1)))));
                 }
-                for p in 1..=total_pages {
-                    let cls = if p == current_page { "nav-tab active" } else { "nav-tab" };
-                    buf.push_str(&format!("<a href=\"{}\" class=\"{cls}\">{p}</a>", escape(&page_href(Some(p)))));
+                for item in windowed_pages(current_page, total_pages) {
+                    match item {
+                        Some(p) => {
+                            let cls = if p == current_page { "nav-tab active" } else { "nav-tab" };
+                            buf.push_str(&format!("<a href=\"{}\" class=\"{cls}\">{p}</a>", escape(&page_href(Some(p)))));
+                        }
+                        None => buf.push_str("<span class=\"pager-ellipsis\" aria-hidden=\"true\">…</span>"),
+                    }
                 }
                 if current_page < total_pages {
                     buf.push_str(&format!("<a href=\"{}\" class=\"nav-tab\">Next →</a>", escape(&page_href(Some(current_page + 1)))));
@@ -533,27 +751,64 @@ pub fn render_lineup(
 
         render_pager(&mut h);
 
+        if operator {
+            h.push_str("<form id=\"bulk_form\" method=\"post\" action=\"ui/bulk_channel_override\" class=\"bulk-bar\">");
+            h.push_str(&format!("<input type=\"hidden\" name=\"redirect_to\" value=\"{}\">", escape(&current_redirect)));
+            h.push_str("<label>Bulk action <select name=\"bulk_action\" aria-label=\"Bulk action\">");
+            h.push_str("<option value=\"hide\">Hide selected</option>");
+            h.push_str("<option value=\"unhide\">Unhide selected</option>");
+            h.push_str("<option value=\"set_country\">Set country</option>");
+            h.push_str("<option value=\"set_group\">Set Aurelis group</option>");
+            h.push_str("<option value=\"clear_number\">Clear dial numbers</option>");
+            h.push_str("<option value=\"reset\">Reset overrides</option>");
+            h.push_str("</select></label>");
+            h.push_str("<label>Country <input type=\"text\" name=\"country_code\" list=\"country-list\" placeholder=\"e.g. GB\" size=\"5\"></label>");
+            h.push_str("<label>Group ");
+            render_group_dropdown(&mut h, "", "", None, None, "Automatic", &sports_folders, true);
+            h.push_str("</label>");
+            h.push_str("<button type=\"submit\" class=\"btn-save\">Apply to selected</button>");
+            h.push_str("</form>");
+        }
+
+        if operator {
+            let shown = channels.len().saturating_sub(start_idx).min(PER_PAGE);
+            h.push_str(&format!(
+                "<form id=\"rows_form\" method=\"post\" action=\"ui/save_channel_rows\"><input type=\"hidden\" name=\"redirect_to\" value=\"{}\"><input type=\"hidden\" name=\"rows\" value=\"{shown}\"></form>",
+                escape(&current_redirect)
+            ));
+            h.push_str("<div class=\"save-all-bar\"><button form=\"rows_form\" type=\"submit\" name=\"save_all\" value=\"1\" class=\"btn-save\">Save all changes</button><span class=\"job-meta\">Edit as many rows as you like, then save once. Only rows you changed are written; each row's Save still saves just that row.</span></div>");
+        }
+        if query.sort.as_deref().is_some_and(|s| !s.is_empty()) {
+            h.push_str("<p class=\"job-meta\">Sorted for editing only. Televisions always show each group in TV order (dial number, then name).</p>");
+        }
         h.push_str("<div class=\"table-wrap\"><table class=\"channel-table\">");
-        h.push_str("<thead><tr><th>Dial #</th><th>Channel</th><th>Country</th><th>Category</th><th>Hide</th>");
+        h.push_str("<thead><tr>");
+        if operator {
+            h.push_str("<th>Sel</th>");
+        }
+        h.push_str("<th>Dial #</th><th>Channel</th><th>Country</th><th>Aurelis group</th><th>Hide</th>");
         if operator {
             h.push_str("<th>Actions</th>");
         }
         h.push_str("</tr></thead><tbody>");
 
+        let mut row_forms = String::new();
         for (idx, ch) in channels.iter().skip(start_idx).take(PER_PAGE).enumerate() {
             let form_id = format!("f_{idx}");
             let del_id = format!("del_{idx}");
+            let anchor_id = row_anchor_id(&ch.id);
             let num_str = ch.channel_number.map(|n| n.to_string()).unwrap_or_default();
             let is_hidden = ch.hidden == Some(true);
-            let has_override = lineup.get_override(&ch.id).is_some();
+            let channel_override = lineup.get_override(&ch.id);
+            let has_override = channel_override.is_some();
 
             if operator {
-                h.push_str(&format!(
-                    "<form id=\"{}\" method=\"post\" action=\"ui/save_channel_override\"><input type=\"hidden\" name=\"channel_id\" value=\"{}\"><input type=\"hidden\" name=\"redirect_to\" value=\"{}\"></form>",
-                    form_id, escape(&ch.id), escape(&current_redirect)
+                row_forms.push_str(&format!(
+                    "<input form=\"rows_form\" type=\"hidden\" name=\"channel_id__{idx}\" value=\"{}\"><input form=\"rows_form\" type=\"hidden\" name=\"row_edit__{idx}\" value=\"1\">",
+                    escape(&ch.id)
                 ));
                 if has_override {
-                    h.push_str(&format!(
+                    row_forms.push_str(&format!(
                         "<form id=\"{}\" method=\"post\" action=\"ui/delete_channel_override\"><input type=\"hidden\" name=\"channel_id\" value=\"{}\"><input type=\"hidden\" name=\"redirect_to\" value=\"{}\"></form>",
                         del_id, escape(&ch.id), escape(&current_redirect)
                     ));
@@ -569,11 +824,34 @@ pub fn render_lineup(
                 format!(" class=\"{}\"", row_classes.join(" "))
             };
 
-            h.push_str(&format!("<tr{row_class_attr}>"));
+            let logo_img = ch.logo_url.as_deref()
+                .filter(|url| crate::lineup::is_valid_logo_url(url))
+                .map(|url| format!(
+                    "<img class=\"ch-logo\" src=\"{}\" alt=\"\" loading=\"lazy\" decoding=\"async\" referrerpolicy=\"no-referrer\">",
+                    escape(url.trim())
+                ))
+                .unwrap_or_default();
+
+            h.push_str(&format!("<tr id=\"{anchor_id}\"{row_class_attr}>"));
             if operator {
                 h.push_str(&format!(
-                    "<td><input form=\"{}\" type=\"number\" name=\"channel_number\" value=\"{}\" placeholder=\"-\"></td>",
-                    form_id, escape(&num_str)
+                    "<td class=\"channel-select\" data-label=\"Select\"><input type=\"checkbox\" form=\"bulk_form\" name=\"channel_ids\" value=\"{}\" aria-label=\"Select {}\"></td>",
+                    escape(&ch.id), escape(&ch.name)
+                ));
+                let group = crate::lineup::dial_group(ch);
+                let current_position = group_positions[&ch.id];
+                let group_size = group_counts[&group];
+                let scope = escape(&group.to_string());
+                let up_pos = current_position.saturating_sub(1).max(1);
+                let down_pos = (current_position + 1).min(group_size);
+                let up_disabled = if current_position <= 1 { " disabled" } else { "" };
+                let down_disabled = if current_position >= group_size { " disabled" } else { "" };
+                h.push_str(&format!(
+                    "<td data-label=\"Dial number\"><div class=\"dial-controls\"><input aria-label=\"Dial number\" form=\"rows_form\" type=\"number\" name=\"channel_number__{idx}\" value=\"{}\" placeholder=\"–\"><button form=\"rows_form\" type=\"submit\" name=\"quick_move\" value=\"{idx}:{up_pos}\" class=\"btn-move\" title=\"Move up\" aria-label=\"Move up\"{up_disabled}>▲</button><button form=\"rows_form\" type=\"submit\" name=\"quick_move\" value=\"{idx}:{down_pos}\" class=\"btn-move\" title=\"Move down\" aria-label=\"Move down\"{down_disabled}>▼</button></div>",
+                    escape(&num_str),
+                ));
+                h.push_str(&format!(
+                    "<label class=\"dial-position\">Move to position <input form=\"rows_form\" type=\"number\" name=\"move_to_position__{idx}\" min=\"1\" placeholder=\"{current_position}\" aria-describedby=\"position-{form_id}\"></label><small id=\"position-{form_id}\">{current_position} of {group_size} · {scope}</small></td>",
                 ));
                 let orig_note = if let Some(ref orig) = ch.original_name {
                     format!(" · Auto: {}", escape(orig))
@@ -585,52 +863,100 @@ pub fn render_lineup(
                 } else {
                     ""
                 };
-                h.push_str(&format!(
-                    "<td><input form=\"{}\" type=\"text\" name=\"display_name\" value=\"{}\"><div class=\"channel-id-pill\">{edited_badge}<code>{}</code>{orig_note}</div></td>",
-                    form_id, escape(&ch.name), escape(&ch.id)
-                ));
-                h.push_str(&format!(
-                    "<td><input form=\"{}\" class=\"input-country\" type=\"text\" name=\"country_code\" list=\"country-list\" value=\"{}\" size=\"4\"></td>",
-                    form_id, escape(ch.country_code.as_deref().unwrap_or_default())
-                ));
-                let aurelis_cat = crate::lineup::resolve_aurelis_category(ch);
-                let orig_cat_note = if let Some(ref og) = ch.original_genre {
-                    format!(" · Orig: {}", escape(og))
+                let logo_override = channel_override.as_ref().and_then(|row| row.logo_url.as_deref()).unwrap_or("");
+                let logo_summary = if logo_override.is_empty() {
+                    "Channel logo"
                 } else {
-                    String::new()
+                    "Channel logo (custom)"
                 };
                 h.push_str(&format!(
-                    "<td><input form=\"{}\" class=\"input-category\" type=\"text\" name=\"category\" list=\"category-list\" value=\"{}\"><div class=\"channel-id-pill\"><span class=\"badge\">Aurelis: {}</span>{orig_cat_note}</div></td>",
-                    form_id, escape(ch.genre.as_deref().unwrap_or_default()), escape(aurelis_cat)
+                    "<td class=\"channel-name\" data-label=\"Channel\"><div class=\"ch-title-row\">{logo_img}<input aria-label=\"Channel name\" form=\"rows_form\" type=\"text\" name=\"display_name__{idx}\" value=\"{}\"></div><div class=\"channel-id-pill\">{edited_badge}<code>{}</code>{orig_note}</div>",
+                    escape(&ch.name), escape(&ch.id)
                 ));
+                let automatic_group = crate::lineup::resolve_automatic_aurelis_category(ch);
+                let effective_group = crate::lineup::resolve_aurelis_category(ch);
+                let folder_override = channel_override.as_ref().and_then(|row| row.sports_extra_group.as_deref()).unwrap_or("");
+                let show_folder_inline = effective_group == "Sports Extra" || automatic_group == "Sports Extra" || !folder_override.is_empty();
+                h.push_str(&format!(
+                    "<details class=\"channel-logo\"><summary>{logo_summary}</summary><input aria-label=\"Channel logo URL\" form=\"rows_form\" type=\"url\" name=\"logo_url__{idx}\" value=\"{}\" placeholder=\"Provider logo\"><small>Leave blank to use the provider logo.</small>",
+                    escape(logo_override),
+                ));
+                if !show_folder_inline && !sports_folders.is_empty() {
+                    h.push_str(&format!(
+                        "<input aria-label=\"Sports Extra folder\" form=\"rows_form\" class=\"sports-folder-input\" type=\"text\" name=\"sports_extra_group__{idx}\" list=\"sports-folder-list\" value=\"\" placeholder=\"Move to Sports Extra folder\"><small>Optional: moves this channel into a Sports Extra folder.</small>"
+                    ));
+                }
+                h.push_str("</details></td>");
+                h.push_str(&format!(
+                    "<td data-label=\"Country\"><input aria-label=\"Country\" form=\"rows_form\" class=\"input-country\" type=\"text\" name=\"country_code__{idx}\" list=\"country-list\" value=\"{}\" size=\"4\"></td>",
+                    escape(ch.country_code.as_deref().unwrap_or_default())
+                ));
+                let automatic = match ch.sports_extra_group.as_deref() {
+                    Some(folder) if automatic_group == "Sports Extra" && channel_override.as_ref().is_none_or(|row| row.sports_extra_group.is_none()) =>
+                        format!("Automatic · {automatic_group} / {}", sports_folder_label(folder)),
+                    _ => format!("Automatic · {automatic_group}"),
+                };
+                h.push_str("<td class=\"channel-group\" data-label=\"Aurelis group\">");
+                render_group_dropdown(
+                    &mut h, &format!("form=\"rows_form\""), &format!("__{idx}"),
+                    channel_override.as_ref().and_then(|row| row.category.as_deref()),
+                    channel_override.as_ref().and_then(|row| row.sports_extra_group.as_deref()),
+                    &automatic, &sports_folders, false,
+                );
+                if show_folder_inline && !sports_folders.is_empty() {
+                    let placeholder = ch.sports_extra_group.as_deref()
+                        .filter(|_| folder_override.is_empty())
+                        .unwrap_or("Sports Extra folder");
+                    if !folder_override.is_empty() {
+                        h.push_str(&format!(
+                            "<input form=\"rows_form\" type=\"hidden\" name=\"prev_sports_extra_group__{idx}\" value=\"{}\">",
+                            escape(folder_override)
+                        ));
+                    }
+                    h.push_str(&format!(
+                        "<input aria-label=\"Sports Extra folder\" form=\"rows_form\" class=\"sports-folder-input\" type=\"text\" name=\"sports_extra_group__{idx}\" list=\"sports-folder-list\" value=\"{}\" placeholder=\"{}\">",
+                        escape(folder_override), escape(placeholder)
+                    ));
+                }
+                if let Some(provider) = ch.original_genre.as_deref().or(ch.genre.as_deref()).filter(|s| !s.is_empty()) {
+                    h.push_str(&format!("<div class=\"channel-id-pill\">Provider: {}</div>", escape(provider)));
+                }
+                h.push_str("</td>");
                 let checked_attr = if is_hidden { "checked" } else { "" };
                 h.push_str(&format!(
-                    "<td style=\"text-align: center;\"><input form=\"{}\" type=\"checkbox\" name=\"hidden\" value=\"true\" {}></td>",
-                    form_id, checked_attr
+                    "<td class=\"channel-hidden\" data-label=\"Hide\"><input aria-label=\"Hide channel\" form=\"rows_form\" type=\"checkbox\" name=\"hidden__{idx}\" value=\"true\" {}></td>",
+                    checked_attr
                 ));
-                h.push_str("<td style=\"white-space: nowrap;\">");
-                h.push_str(&format!("<button form=\"{}\" type=\"submit\" class=\"btn-save\">Save</button> ", form_id));
+                h.push_str("<td class=\"channel-actions\">");
+                h.push_str(&format!("<button form=\"rows_form\" type=\"submit\" name=\"save_row\" value=\"{idx}\" class=\"btn-save\">Save</button> "));
                 if has_override {
                     h.push_str(&format!("<button form=\"{}\" type=\"submit\" class=\"btn-reset\">Reset</button>", del_id));
                 }
                 h.push_str("</td>");
             } else {
-                h.push_str(&format!("<td>{}</td>", escape(&num_str)));
+                h.push_str(&format!("<td data-label=\"Dial number\">{}</td>", escape(&num_str)));
                 h.push_str(&format!(
-                    "<td>{}<div class=\"channel-id-pill\"><code>{}</code></div></td>",
+                    "<td class=\"channel-name\" data-label=\"Channel\"><div class=\"ch-title-row\">{logo_img}<span>{}</span></div><div class=\"channel-id-pill\"><code>{}</code></div></td>",
                     escape(&ch.name), escape(&ch.id)
                 ));
-                h.push_str(&format!("<td>{}</td>", escape(ch.country_code.as_deref().unwrap_or("-"))));
-                let aurelis_cat = crate::lineup::resolve_aurelis_category(ch);
-                h.push_str(&format!(
-                    "<td>{}<div class=\"channel-id-pill\"><span class=\"badge\">Aurelis: {}</span></div></td>",
-                    escape(ch.genre.as_deref().unwrap_or("-")), escape(aurelis_cat)
-                ));
-                h.push_str(&format!("<td>{}</td>", if is_hidden { "Yes" } else { "No" }));
+                h.push_str(&format!("<td data-label=\"Country\">{}</td>", escape(ch.country_code.as_deref().unwrap_or("-"))));
+                let aurelis_group = crate::lineup::resolve_aurelis_category(ch);
+                h.push_str(&format!("<td class=\"channel-group\" data-label=\"Aurelis group\">{}", escape(aurelis_group)));
+                if aurelis_group == "Sports Extra" {
+                    if let Some(folder) = ch.sports_extra_group.as_deref() {
+                        h.push_str(&format!("<div class=\"channel-id-pill\">{}</div>", escape(&sports_folder_label(folder))));
+                    }
+                }
+                if let Some(provider) = ch.original_genre.as_deref().or(ch.genre.as_deref()).filter(|s| !s.is_empty()) {
+                    h.push_str(&format!("<div class=\"channel-id-pill\">Provider: {}</div>", escape(provider)));
+                }
+                h.push_str("</td>");
+                h.push_str(&format!("<td class=\"channel-hidden\" data-label=\"Hidden\">{}</td>", if is_hidden { "Yes" } else { "No" }));
             }
             h.push_str("</tr>");
         }
         h.push_str("</tbody></table></div>");
+        h.push_str(&row_forms);
         render_pager(&mut h);
     }
     h.push_str("</section>");

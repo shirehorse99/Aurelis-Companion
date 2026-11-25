@@ -26,6 +26,7 @@ pub mod stage;
 pub mod tuner;
 pub mod homeassistant;
 pub mod lineup;
+pub mod lineup_tv;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use std::net::SocketAddr;
@@ -91,7 +92,8 @@ async fn status(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<Soc
     let raw_query = req.uri().query().unwrap_or("");
     if raw_query.contains("tab=lineup") {
         let query = lineup::parse_channel_query(raw_query);
-        return (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], status_page::render_lineup(&state.page_view(), &state.lineup, operator, &query)).into_response();
+        let flash = query.flash.as_deref().and_then(|tok| state.get_flash(tok));
+        return (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], status_page::render_lineup_with_flash(&state.page_view(), &state.lineup, operator, &query, flash.as_ref())).into_response();
     }
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], status_page::render(&state.page_view(), operator)).into_response()
 }
@@ -99,8 +101,13 @@ async fn status(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<Soc
 async fn lineup_view(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<SocketAddr>>, headers: HeaderMap, req: Request) -> Response {
     let editor = lineup_editor_request(peer, &headers);
     let raw_query = req.uri().query().unwrap_or("");
+    if !raw_query.split('&').any(|part| part == "view=table") {
+        let page = lineup_tv::render(&state.page_view(), &state.lineup, editor, &lineup_tv::page_query(raw_query));
+        return (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response();
+    }
     let query = lineup::parse_channel_query(raw_query);
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], status_page::render_lineup(&state.page_view(), &state.lineup, editor, &query)).into_response()
+    let flash = query.flash.as_deref().and_then(|tok| state.get_flash(tok));
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], status_page::render_lineup_with_flash(&state.page_view(), &state.lineup, editor, &query, flash.as_ref())).into_response()
 }
 
 /// The status page's Unpair button: same peer gate and same-origin check as the other form.
@@ -128,6 +135,63 @@ async fn ui_unpair(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+fn check_same_origin(headers: &HeaderMap) -> Result<(), Response> {
+    status_page::same_origin(
+        header_str(headers, "host"),
+        header_str(headers, "x-forwarded-host"),
+        header_str(headers, "origin"),
+        header_str(headers, "referer"),
+    )
+    .map_err(|reason| {
+        (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], reason).into_response()
+    })
+}
+
+fn wants_html(headers: &HeaderMap) -> bool {
+    header_str(headers, "accept").is_some_and(|accept| accept.contains("text/html"))
+}
+
+fn append_flash_and_anchor(dest: &str, flash_token: &str, anchor: Option<&str>) -> String {
+    let mut out = if dest.contains('?') {
+        format!("{dest}&f={flash_token}")
+    } else if dest.ends_with("/lineup") || dest == "lineup" {
+        format!("{dest}?f={flash_token}")
+    } else {
+        dest.to_string()
+    };
+    if let Some(a) = anchor {
+        out.push('#');
+        out.push_str(a);
+    }
+    out
+}
+
+fn redirect_with_flash(
+    state: &AppState,
+    dest: &str,
+    kind: state::FlashKind,
+    message: impl Into<String>,
+    anchor: Option<&str>,
+) -> Response {
+    let token = state.push_flash(kind, message);
+    let target = append_flash_and_anchor(dest, &token, anchor);
+    (StatusCode::SEE_OTHER, [(header::LOCATION, target)], "").into_response()
+}
+
+fn ui_error_or_redirect(
+    state: &AppState,
+    headers: &HeaderMap,
+    dest: &str,
+    message: impl Into<String>,
+) -> Response {
+    let msg = message.into();
+    if wants_html(headers) && dest.starts_with("../lineup") {
+        redirect_with_flash(state, dest, state::FlashKind::Error, msg, None)
+    } else {
+        (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], msg).into_response()
+    }
 }
 
 /// The status page's Pause/Resume form: same peer gate and same-origin check as Unpair. Pausing
@@ -160,6 +224,7 @@ async fn toggle_notifications(State(state): State<Arc<AppState>>, peer: Option<C
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let current = state.ha.notifications_enabled();
     state.ha.set_notifications_enabled(!current);
     state.push_job(&format!("notifications master switch toggled to {}", if !current { "on" } else { "off" }));
@@ -170,6 +235,7 @@ async fn toggle_cctv_dedup(State(state): State<Arc<AppState>>, peer: Option<Conn
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let current = state.ha.suppress_cctv_duplicates();
     state.ha.set_suppress_cctv_duplicates(!current);
     state.push_job(&format!("CCTV duplicate alert suppression toggled to {}", if !current { "on" } else { "off" }));
@@ -180,6 +246,7 @@ async fn toggle_catchup_ad_skip(State(state): State<Arc<AppState>>, peer: Option
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let current = state.ha.catchup_ad_skip_enabled();
     state.ha.set_catchup_ad_skip_enabled(!current);
     state.push_job(&format!("catch-up ad skip master switch toggled to {}", if !current { "on" } else { "off" }));
@@ -190,6 +257,7 @@ async fn toggle_catchup_live_handoff(State(state): State<Arc<AppState>>, peer: O
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let current = state.ha.catchup_live_handoff_enabled();
     state.ha.set_catchup_live_handoff_enabled(!current);
     state.push_job(&format!("catch-up live handoff master switch toggled to {}", if !current { "on" } else { "off" }));
@@ -206,6 +274,109 @@ fn parse_form(body: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
+fn parse_form_multi(body: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for part in body.split('&') {
+        if let Some((k, v)) = part.split_once('=') {
+            map.entry(k.to_string()).or_default().push(lineup::urlencoding_decode(v));
+        }
+    }
+    map
+}
+
+/// One editor row's fields as a save request. `suffix` is `""` for the single-row form and
+/// `"__N"` for row N of the page-wide form, whose fields all carry their row's index.
+fn row_save_request(form: &std::collections::HashMap<String, String>, suffix: &str) -> Result<lineup::SaveOverrideRequest, String> {
+    let get = |key: &str| form.get(&format!("{key}{suffix}"));
+    let Some(ch_id) = get("channel_id").cloned() else {
+        return Err("missing channel_id".into());
+    };
+    let row_edit = get("row_edit").is_some_and(|value| value == "1" || value == "true");
+    let (num, clear_channel_number) = match get("channel_number").map(|s| s.trim()) {
+        Some("") => (None, row_edit),
+        Some(raw) => match raw.parse::<i32>() {
+            Ok(n) if n > 0 => (Some(n), false),
+            _ => return Err("Enter a positive dial number, or leave it blank.".into()),
+        },
+        None => (None, false),
+    };
+    let hidden = if row_edit {
+        Some(get("hidden").is_some_and(|h| h == "true" || h == "on"))
+    } else {
+        get("hidden").map(|h| h == "true" || h == "on")
+    };
+    let folder_input = get("sports_extra_group").map(|s| s.trim());
+    let prev_folder = get("prev_sports_extra_group").map(|s| s.trim()).unwrap_or("");
+    let mut sports_extra_group = None;
+    let category = match get("aurelis_group") {
+        Some(value) if value.is_empty() => {
+            if let Some(folder) = folder_input.filter(|f| !f.is_empty() && *f != prev_folder) {
+                sports_extra_group = Some(folder.to_owned());
+                Some("SPORT_EXTRA".into())
+            } else {
+                sports_extra_group = Some(String::new());
+                Some(String::new())
+            }
+        }
+        Some(value) => {
+            if let Some(dropdown_folder) = value.strip_prefix("SPORT_EXTRA::") {
+                let effective_folder = match folder_input {
+                    Some(typed) => typed.to_owned(),
+                    None => dropdown_folder.to_owned(),
+                };
+                sports_extra_group = Some(effective_folder);
+                Some("SPORT_EXTRA".into())
+            } else if let Some(groups) = value.split(',').map(lineup::aurelis_group_key).collect::<Option<Vec<_>>>() {
+                let joined = groups.join(",");
+                if joined == "SPORT_EXTRA" {
+                    sports_extra_group = Some(folder_input.unwrap_or("").to_owned());
+                } else {
+                    sports_extra_group = Some(String::new());
+                }
+                Some(joined)
+            } else {
+                return Err("invalid Aurelis group".into());
+            }
+        }
+        None => get("category").cloned().filter(|s| !s.trim().is_empty()),
+    };
+    let quick_move = get("quick_move").map(|s| s.trim()).filter(|s| !s.is_empty());
+    let raw_move = quick_move.or_else(|| get("move_to_position").map(|s| s.trim()).filter(|s| !s.is_empty()));
+    let move_to_position = match raw_move {
+        Some(value) => match value.parse::<usize>() {
+            Ok(position) => Some(position),
+            Err(_) => return Err("Enter a position as a whole number.".into()),
+        },
+        None => None,
+    };
+    let display_name = if row_edit {
+        get("display_name").cloned()
+    } else {
+        get("display_name").cloned().filter(|s| !s.trim().is_empty())
+    };
+    let country_code = if row_edit {
+        get("country_code").cloned()
+    } else {
+        get("country_code").cloned().filter(|s| !s.trim().is_empty())
+    };
+    Ok(lineup::SaveOverrideRequest {
+        channel_id: ch_id,
+        display_name,
+        category,
+        country_code,
+        position: None,
+        channel_number: num,
+        epg_id: None,
+        hidden,
+        updated_at_ms: None,
+        logo_url: get("logo_url").cloned(),
+        sports_extra_group,
+        move_to_position,
+        clear_channel_number,
+        row_edit,
+    })
+}
+
 async fn ui_save_channel_override(
     State(state): State<Arc<AppState>>,
     peer: Option<ConnectInfo<SocketAddr>>,
@@ -215,28 +386,134 @@ async fn ui_save_channel_override(
     if !lineup_editor_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let form = parse_form(&body);
-    let Some(ch_id) = form.get("channel_id").cloned() else {
-        return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "missing channel_id").into_response();
-    };
-    let num = form.get("channel_number").and_then(|s| s.parse::<i32>().ok());
-    let hidden = form.get("hidden").map(|h| h == "true" || h == "on");
-    let req = lineup::SaveOverrideRequest {
-        channel_id: ch_id,
-        display_name: form.get("display_name").cloned().filter(|s| !s.trim().is_empty()),
-        category: form.get("category").cloned().filter(|s| !s.trim().is_empty()),
-        country_code: form.get("country_code").cloned().filter(|s| !s.trim().is_empty()),
-        position: None,
-        channel_number: num,
-        epg_id: None,
-        hidden,
-        updated_at_ms: None,
-    };
-    if let Err(e) = state.lineup.set_override(req) {
-        return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], e).into_response();
-    }
     let dest = safe_lineup_redirect(form.get("redirect_to"));
-    (StatusCode::SEE_OTHER, [(header::LOCATION, dest)], "").into_response()
+    let req = match row_save_request(&form, "") {
+        Ok(req) => req,
+        Err(error) => return ui_error_or_redirect(&state, &headers, &dest, error),
+    };
+    let ch_id = req.channel_id.clone();
+    let move_to_position = req.move_to_position;
+    let row_edit = req.row_edit;
+    if let Err(e) = state.lineup.set_override(req) {
+        return ui_error_or_redirect(&state, &headers, &dest, e);
+    }
+    let ch_name = state.lineup.channel_display_name(&ch_id);
+    let anchor = status_page::row_anchor_id(&ch_id);
+    let notice = if let Some(pos) = move_to_position {
+        format!("Moved {ch_name} to position {pos}.")
+    } else if row_edit && state.lineup.get_override(&ch_id).is_none() {
+        format!("Cleared overrides for {ch_name}.")
+    } else {
+        format!("Saved {ch_name}.")
+    };
+    redirect_with_flash(&state, &dest, state::FlashKind::Success, notice, Some(&anchor))
+}
+
+/// The editor page's one form: a row's own Save or move buttons save that row, "Save all
+/// changes" (or Enter in any field) saves every row on the page that was changed. Rows are
+/// retried while any save succeeds, so a chain of renumbers (A to 102 while B leaves 102)
+/// lands whatever order the rows were in; a straight swap still needs a spare number.
+async fn ui_save_channel_rows(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !lineup_editor_request(peer, &headers) {
+        return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
+    }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
+    let mut form = parse_form(&body);
+    let dest = safe_lineup_redirect(form.get("redirect_to"));
+    let rows = form.get("rows").and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0).min(1000);
+    let single = if let Some((row, position)) = form.get("quick_move").and_then(|v| v.split_once(':')) {
+        let (row, position) = (row.trim().to_owned(), position.trim().to_owned());
+        form.insert(format!("quick_move__{row}"), position);
+        row.parse::<usize>().ok()
+    } else {
+        form.get("save_row").and_then(|v| v.trim().parse::<usize>().ok())
+    };
+    let selected: Vec<usize> = match single {
+        Some(row) if row < rows => vec![row],
+        Some(_) => return ui_error_or_redirect(&state, &headers, &dest, "That row is no longer on the page. Reload and try again."),
+        None => (0..rows).collect(),
+    };
+
+    let mut pending = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for row in selected {
+        match row_save_request(&form, &format!("__{row}")) {
+            Ok(req) => pending.push(req),
+            Err(error) => {
+                let id = form.get(&format!("channel_id__{row}")).cloned().unwrap_or_default();
+                failed.push((id, error));
+            }
+        }
+    }
+    let single_row = single.is_some();
+    let mut saved: Vec<(String, Option<usize>)> = Vec::new();
+    let mut last_errors: Vec<(String, String)> = Vec::new();
+    while !pending.is_empty() {
+        let mut progress = false;
+        last_errors.clear();
+        let mut retry = Vec::new();
+        for req in pending {
+            let id = req.channel_id.clone();
+            let moved = req.move_to_position;
+            match state.lineup.save_override(req.clone()) {
+                Ok((_, changed)) => {
+                    progress = true;
+                    if changed {
+                        saved.push((id, moved));
+                    }
+                }
+                Err(error) => {
+                    last_errors.push((id, error));
+                    retry.push(req);
+                }
+            }
+        }
+        pending = if progress { retry } else { Vec::new() };
+    }
+    failed.extend(last_errors);
+
+    let name = |id: &str| state.lineup.channel_display_name(id);
+    if !saved.is_empty() {
+        state.push_job(&format!("lineup: saved {} channels from the editor", saved.len()));
+    }
+    if single_row && failed.is_empty() {
+        let id = form.get(&format!("channel_id__{}", single.unwrap_or(0))).cloned().unwrap_or_default();
+        let anchor = status_page::row_anchor_id(&id);
+        let notice = match saved.first() {
+            Some((id, Some(pos))) => format!("Moved {} to position {pos}.", name(id)),
+            Some((id, None)) if state.lineup.get_override(id).is_none() => format!("Cleared overrides for {}.", name(id)),
+            Some((id, None)) => format!("Saved {}.", name(id)),
+            None => format!("No changes to save for {}.", name(&id)),
+        };
+        return redirect_with_flash(&state, &dest, state::FlashKind::Success, notice, Some(&anchor));
+    }
+    let saved_part = match saved.len() {
+        0 => "No changes saved.".to_string(),
+        1 => format!("Saved {}.", name(&saved[0].0)),
+        n => format!("Saved {n} channels."),
+    };
+    if failed.is_empty() {
+        let anchor = saved.last().map(|(id, _)| status_page::row_anchor_id(id));
+        return redirect_with_flash(&state, &dest, state::FlashKind::Success, saved_part, anchor.as_deref());
+    }
+    let reasons = failed.iter().take(5)
+        .map(|(id, why)| format!("{}: {why}", if id.is_empty() { "a row".to_string() } else { name(id) }))
+        .collect::<Vec<_>>().join(" · ");
+    let more = if failed.len() > 5 { format!(" (and {} more)", failed.len() - 5) } else { String::new() };
+    let anchor = failed.first().filter(|(id, _)| !id.is_empty()).map(|(id, _)| status_page::row_anchor_id(id));
+    let message = format!("{saved_part} Not saved — {reasons}{more}");
+    if wants_html(&headers) && dest.starts_with("../lineup") {
+        redirect_with_flash(&state, &dest, state::FlashKind::Error, message, anchor.as_deref())
+    } else {
+        (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], message).into_response()
+    }
 }
 
 fn safe_lineup_redirect(raw: Option<&String>) -> String {
@@ -256,12 +533,19 @@ async fn ui_delete_channel_override(
     if !lineup_editor_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let form = parse_form(&body);
-    if let Some(ch_id) = form.get("channel_id") {
-        let _ = state.lineup.delete_override(ch_id);
-    }
     let dest = safe_lineup_redirect(form.get("redirect_to"));
-    (StatusCode::SEE_OTHER, [(header::LOCATION, dest)], "").into_response()
+    let mut notice = "No override removed.".to_string();
+    let mut anchor = None;
+    if let Some(ch_id) = form.get("channel_id") {
+        let name = state.lineup.channel_display_name(ch_id);
+        anchor = Some(status_page::row_anchor_id(ch_id));
+        if matches!(state.lineup.delete_override(ch_id), Ok(true)) {
+            notice = format!("Reset overrides for {name}.");
+        }
+    }
+    redirect_with_flash(&state, &dest, state::FlashKind::Success, notice, anchor.as_deref())
 }
 
 async fn ui_assign_numbers(
@@ -273,17 +557,131 @@ async fn ui_assign_numbers(
     if !lineup_editor_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
     }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
     let form = parse_form(&body);
-    let start_num = form.get("start_number").and_then(|s| s.parse::<i32>().ok());
+    let dest = safe_lineup_redirect(form.get("redirect_to"));
+    let start_num = match form.get("start_number").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(raw) => match raw.parse::<i32>() {
+            Ok(n) if n > 0 => Some(n),
+            _ => return ui_error_or_redirect(&state, &headers, &dest, "Enter a positive starting dial number, or leave it blank."),
+        },
+        None => None,
+    };
     let overwrite = form.get("overwrite").map(|o| o == "true" || o == "on");
     let req = lineup::AssignNumbersRequest {
         country_code: form.get("country_code").cloned().filter(|s| !s.trim().is_empty()),
+        group: form.get("aurelis_group").cloned().filter(|s| !s.trim().is_empty()),
         start_number: start_num,
         overwrite_existing: overwrite,
+        order: form.get("order").cloned().filter(|s| !s.trim().is_empty()),
     };
-    let _ = state.lineup.assign_channel_numbers(req);
+    match state.lineup.assign_channel_numbers(req) {
+        Ok(0) => redirect_with_flash(&state, &dest, state::FlashKind::Success, "All matching channels already had dial numbers.", None),
+        Ok(count) => redirect_with_flash(&state, &dest, state::FlashKind::Success, format!("Assigned dial numbers to {count} channels."), None),
+        Err(error) => ui_error_or_redirect(&state, &headers, &dest, error),
+    }
+}
+
+async fn ui_bulk_channel_override(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !lineup_editor_request(peer, &headers) {
+        return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
+    }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
+    let form = parse_form_multi(&body);
+    let dest = safe_lineup_redirect(form.get("redirect_to").and_then(|v| v.last()));
+    let channel_ids = form.get("channel_ids").cloned().unwrap_or_default();
+    let action_name = form.get("bulk_action").and_then(|v| v.last()).map(|s| s.as_str()).unwrap_or("");
+    let (action, label) = match action_name {
+        "hide" => (lineup::BulkAction::Hide, "hidden"),
+        "unhide" => (lineup::BulkAction::Unhide, "unhidden"),
+        "clear_number" => (lineup::BulkAction::ClearNumber, "dial numbers cleared"),
+        "reset" => (lineup::BulkAction::Reset, "overrides reset"),
+        "set_country" => {
+            let cc = form.get("country_code").and_then(|v| v.last()).cloned().unwrap_or_default();
+            (lineup::BulkAction::SetCountry(cc), "country updated")
+        }
+        "set_group" => {
+            let val = form.get("aurelis_group").and_then(|v| v.last()).map(|s| s.trim()).unwrap_or("");
+            if val.is_empty() {
+                (lineup::BulkAction::SetGroup { category: None, sports_extra_group: None }, "group reset to Automatic")
+            } else if let Some(folder) = val.strip_prefix("SPORT_EXTRA::") {
+                (
+                    lineup::BulkAction::SetGroup {
+                        category: Some("SPORT_EXTRA".into()),
+                        sports_extra_group: Some(folder.to_owned()),
+                    },
+                    "moved to Sports Extra folder",
+                )
+            } else if let Some(key) = lineup::aurelis_group_key(val) {
+                (
+                    lineup::BulkAction::SetGroup {
+                        category: Some(key.to_owned()),
+                        sports_extra_group: None,
+                    },
+                    "Aurelis group updated",
+                )
+            } else {
+                return ui_error_or_redirect(&state, &headers, &dest, "Invalid Aurelis group selected.");
+            }
+        }
+        _ => return ui_error_or_redirect(&state, &headers, &dest, "Choose a valid bulk action."),
+    };
+    match state.lineup.bulk_update(lineup::BulkOverrideRequest { channel_ids, action }) {
+        Ok(0) => redirect_with_flash(&state, &dest, state::FlashKind::Success, "Selected channels already matched that state.", None),
+        Ok(count) => {
+            state.push_job(&format!("lineup: bulk updated {count} channels ({label})"));
+            redirect_with_flash(&state, &dest, state::FlashKind::Success, format!("Updated {count} channels ({label})."), None)
+        }
+        Err(err) => ui_error_or_redirect(&state, &headers, &dest, err),
+    }
+}
+
+async fn ui_export_overrides(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+) -> Response {
+    if !lineup_editor_request(peer, &headers) {
+        return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
+    }
+    match state.lineup.export_overrides_json() {
+        Ok(json) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(header::CONTENT_DISPOSITION, "attachment; filename=\"aurelis-lineup-overrides.json\"")
+            .body(axum::body::Body::from(json))
+            .unwrap(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], err).into_response(),
+    }
+}
+
+async fn ui_import_overrides(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !lineup_editor_request(peer, &headers) {
+        return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
+    }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
+    let form = parse_form(&body);
     let dest = safe_lineup_redirect(form.get("redirect_to"));
-    (StatusCode::SEE_OTHER, [(header::LOCATION, dest)], "").into_response()
+    let raw = form.get("overrides_json").cloned().unwrap_or_default();
+    let replace = form.get("import_mode").is_some_and(|m| m.eq_ignore_ascii_case("replace"));
+    match state.lineup.import_overrides_json(&raw, replace) {
+        Ok(count) => {
+            let mode = if replace { "replaced existing" } else { "merged" };
+            state.push_job(&format!("lineup: imported {count} overrides ({mode})"));
+            redirect_with_flash(&state, &dest, state::FlashKind::Success, format!("Imported {count} overrides ({mode})."), None)
+        }
+        Err(err) => ui_error_or_redirect(&state, &headers, &dest, err),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -414,8 +812,27 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/ui/toggle_catchup_ad_skip", post(toggle_catchup_ad_skip))
         .route("/ui/toggle_catchup_live_handoff", post(toggle_catchup_live_handoff))
         .route("/ui/save_channel_override", post(ui_save_channel_override))
+        // A whole editor page (100 rows of ids, names, logo URLs and folders) posts at once;
+        // the 8 KB default below refused every save ("length limit exceeded", 25 Nov 2026).
+        .route(
+            "/ui/save_channel_rows",
+            post(ui_save_channel_rows).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route("/ui/delete_channel_override", post(ui_delete_channel_override))
+        .route("/ui/tab", get(lineup_tv::get_tab))
+        .route("/ui/tab_order", post(lineup_tv::post_order).layer(DefaultBodyLimit::max(1024 * 1024)))
+        .route("/ui/tab_sort", post(lineup_tv::post_sort))
+        .route("/ui/channel_edit", post(lineup_tv::post_edit).layer(DefaultBodyLimit::max(64 * 1024)))
         .route("/ui/assign_numbers", post(ui_assign_numbers))
+        .route(
+            "/ui/bulk_channel_override",
+            post(ui_bulk_channel_override).layer(DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route("/ui/export_overrides", get(ui_export_overrides))
+        .route(
+            "/ui/import_overrides",
+            post(ui_import_overrides).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .merge(v1)
         .layer(DefaultBodyLimit::max(8 * 1024))
         .with_state(state)

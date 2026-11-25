@@ -18,14 +18,33 @@ pub enum DeviceReachability {
     NoReply,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    Success,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlashNotice {
+    pub kind: FlashKind,
+    pub message: String,
+    pub created_at_ms: i64,
+}
+
 #[derive(Clone)]
 pub struct DeviceStatus {
     pub name: String,
     pub last_seen_ms: i64,
     address: Option<Ipv4Addr>,
     pub reachability: DeviceReachability,
+    pub last_lineup_sync_ms: Option<i64>,
+    pub synced_lineup_etag: Option<String>,
+    pub reported_channels_count: Option<usize>,
+    pub last_channel_report_ms: Option<i64>,
 }
 pub const JOB_LINES_KEPT: usize = 50;
+const FLASH_NOTICES_KEPT: usize = 32;
+const FLASH_TTL_MS: i64 = 5 * 60 * 1000;
 /// AI jobs listed on the status page.
 pub const AI_JOBS_SHOWN: usize = 20;
 /// What the card says of the runner while the operator has paused the Companion: televisions then
@@ -49,6 +68,8 @@ struct Inner {
     assessed_at_ms: i64,
     jobs: VecDeque<(i64, String)>,
     devices: BTreeMap<String, DeviceStatus>,
+    flashes: VecDeque<(String, FlashNotice)>,
+    flash_seq: u64,
     paired: bool,
     household_fingerprint: Option<String>,
     pairing_code: Option<String>,
@@ -118,7 +139,7 @@ pub struct PageView {
     pub catchup_live_handoff_enabled: bool,
     pub lineup_overrides_count: usize,
     pub lineup_channels_count: usize,
-    pub lineup_channels: Vec<crate::lineup::ChannelSummary>,
+    pub lineup_etag: String,
 }
 
 impl AppState {
@@ -169,6 +190,8 @@ impl AppState {
                 assessed_at_ms: now_ms(),
                 jobs: VecDeque::new(),
                 devices: BTreeMap::new(),
+                flashes: VecDeque::new(),
+                flash_seq: 0,
                 paired: view.paired,
                 household_fingerprint: view.fingerprint,
                 pairing_code: view.code,
@@ -284,7 +307,7 @@ impl AppState {
             catchup_live_handoff_enabled: self.ha.catchup_live_handoff_enabled(),
             lineup_overrides_count: self.lineup.overrides_count(),
             lineup_channels_count: self.lineup.channels_count(),
-            lineup_channels: self.lineup.get_channels(),
+            lineup_etag: self.lineup.overrides_etag(),
         }
     }
 
@@ -339,6 +362,53 @@ impl AppState {
         }
     }
 
+    pub fn push_flash(&self, kind: FlashKind, message: impl Into<String>) -> String {
+        let mut inner = self.lock();
+        let now = self.wall_ms();
+        inner.flashes.retain(|(_, n)| now.saturating_sub(n.created_at_ms) < FLASH_TTL_MS);
+        inner.flash_seq = inner.flash_seq.wrapping_add(1);
+        let token = format!("{:08x}", inner.flash_seq.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (now as u64));
+        let clean: String = message.into().chars().filter(|c| !c.is_control()).take(300).collect();
+        inner.flashes.push_back((
+            token.clone(),
+            FlashNotice {
+                kind,
+                message: clean,
+                created_at_ms: now,
+            },
+        ));
+        while inner.flashes.len() > FLASH_NOTICES_KEPT {
+            inner.flashes.pop_front();
+        }
+        token
+    }
+
+    pub fn get_flash(&self, token: &str) -> Option<FlashNotice> {
+        let now = self.wall_ms();
+        let inner = self.lock();
+        inner.flashes.iter().rev().find_map(|(k, v)| {
+            (k == token && now.saturating_sub(v.created_at_ms) < FLASH_TTL_MS).then(|| v.clone())
+        })
+    }
+
+    fn normalize_device_id(raw: &str) -> Option<String> {
+        let trimmed = raw.trim().to_ascii_lowercase();
+        if trimmed.is_empty() || trimmed.len() > 64 || trimmed.chars().any(|c| c.is_control()) {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+
+    fn normalize_device_name(raw: Option<&str>, fallback_id: &str) -> String {
+        let clean = raw
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().filter(|c| !c.is_control()).take(80).collect::<String>())
+            .filter(|s| !s.is_empty());
+        clean.unwrap_or_else(|| fallback_id.to_string())
+    }
+
     pub fn see_device(&self, id: String, name: String, address: Option<Ipv4Addr>) {
         let mut inner = self.lock();
         let now = self.wall_ms();
@@ -347,10 +417,75 @@ impl AppState {
                 inner.devices.remove(&oldest);
             }
         }
+        let prev = inner.devices.get(&id).cloned();
         inner.devices.insert(id, DeviceStatus {
-            name, last_seen_ms: now, address,
-            reachability: if address.is_some() { DeviceReachability::Online } else { DeviceReachability::Unknown },
+            name,
+            last_seen_ms: now,
+            address: address.or_else(|| prev.as_ref().and_then(|p| p.address)),
+            reachability: if address.is_some() {
+                DeviceReachability::Online
+            } else {
+                prev.as_ref().map(|p| p.reachability).unwrap_or(DeviceReachability::Unknown)
+            },
+            last_lineup_sync_ms: prev.as_ref().and_then(|p| p.last_lineup_sync_ms),
+            synced_lineup_etag: prev.as_ref().and_then(|p| p.synced_lineup_etag.clone()),
+            reported_channels_count: prev.as_ref().and_then(|p| p.reported_channels_count),
+            last_channel_report_ms: prev.as_ref().and_then(|p| p.last_channel_report_ms),
         });
+    }
+
+    pub fn record_device_lineup_sync(&self, raw_id: &str, raw_name: Option<&str>, etag: &str) {
+        let Some(id) = Self::normalize_device_id(raw_id) else { return };
+        let mut inner = self.lock();
+        let now = self.wall_ms();
+        if inner.devices.len() >= 32 && !inner.devices.contains_key(&id) {
+            if let Some(oldest) = inner.devices.iter().min_by_key(|(_, device)| device.last_seen_ms).map(|(id, _)| id.clone()) {
+                inner.devices.remove(&oldest);
+            }
+        }
+        let entry = inner.devices.entry(id.clone()).or_insert_with(|| DeviceStatus {
+            name: Self::normalize_device_name(raw_name, &id),
+            last_seen_ms: now,
+            address: None,
+            reachability: DeviceReachability::Online,
+            last_lineup_sync_ms: None,
+            synced_lineup_etag: None,
+            reported_channels_count: None,
+            last_channel_report_ms: None,
+        });
+        if let Some(name) = raw_name.map(str::trim).filter(|s| !s.is_empty()) {
+            entry.name = Self::normalize_device_name(Some(name), &id);
+        }
+        entry.last_seen_ms = now;
+        entry.last_lineup_sync_ms = Some(now);
+        entry.synced_lineup_etag = Some(etag.to_string());
+    }
+
+    pub fn record_device_channel_report(&self, raw_id: Option<&str>, raw_name: Option<&str>, count: usize) {
+        let Some(id) = raw_id.and_then(Self::normalize_device_id) else { return };
+        let mut inner = self.lock();
+        let now = self.wall_ms();
+        if inner.devices.len() >= 32 && !inner.devices.contains_key(&id) {
+            if let Some(oldest) = inner.devices.iter().min_by_key(|(_, device)| device.last_seen_ms).map(|(id, _)| id.clone()) {
+                inner.devices.remove(&oldest);
+            }
+        }
+        let entry = inner.devices.entry(id.clone()).or_insert_with(|| DeviceStatus {
+            name: Self::normalize_device_name(raw_name, &id),
+            last_seen_ms: now,
+            address: None,
+            reachability: DeviceReachability::Online,
+            last_lineup_sync_ms: None,
+            synced_lineup_etag: None,
+            reported_channels_count: None,
+            last_channel_report_ms: None,
+        });
+        if let Some(name) = raw_name.map(str::trim).filter(|s| !s.is_empty()) {
+            entry.name = Self::normalize_device_name(Some(name), &id);
+        }
+        entry.last_seen_ms = now;
+        entry.reported_channels_count = Some(count);
+        entry.last_channel_report_ms = Some(now);
     }
 
     pub fn device_probe_targets(&self) -> Vec<(String, Ipv4Addr, i64)> {

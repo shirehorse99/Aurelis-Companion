@@ -473,6 +473,21 @@ pub async fn run_dvr_scheduler(state: Arc<AppState>) {
     }
 }
 
+/// How long a connect may take, and how long a live stream may go silent, before the capture
+/// treats it as dropped and reconnects.
+const CAPTURE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Waits between reconnects (the last repeats) so a dead provider is not hammered.
+const CAPTURE_RETRY_WAITS_S: &[u64] = &[2, 5, 10, 20, 30];
+/// More time than this missing in drops marks the recording Partial rather than Finished.
+const CAPTURE_GAP_PARTIAL_MS: i64 = 60_000;
+
+/// Records `entry.stream_url` until the scheduled end.
+///
+/// A live stream never ends, so the client has no total timeout: the old 15-second total
+/// timeout cut every recording 15 s in (25 Nov 2026: two Channel 4 recordings, 7 MB each, both
+/// "Partial: stream disconnected"). Instead a silent stream counts as dropped, and a drop is
+/// reconnected and appended to the same file until the end, as an MPEG-TS stream allows.
 async fn capture_stream(state: Arc<AppState>, entry: RecordingEntry) {
     state.dvr.update_status(&entry.id, RecordingStatus::Recording, None, None);
 
@@ -485,7 +500,11 @@ async fn capture_stream(state: Arc<AppState>, entry: RecordingEntry) {
         }
     };
 
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(15)).build() {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(CAPTURE_CONNECT_TIMEOUT)
+        .read_timeout(CAPTURE_IDLE_TIMEOUT)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             state.dvr.finish_recording(&entry.id, RecordingStatus::Failed, 0, Some(format!("HTTP client error: {e}")));
@@ -493,82 +512,129 @@ async fn capture_stream(state: Arc<AppState>, entry: RecordingEntry) {
         }
     };
 
-    let resp = match client.get(&entry.stream_url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            state.dvr.finish_recording(&entry.id, RecordingStatus::Failed, 0, Some(format!("stream HTTP {}", r.status())));
-            return;
-        }
-        Err(e) => {
-            state.dvr.finish_recording(&entry.id, RecordingStatus::Failed, 0, Some(format!("stream connection failed: {e}")));
-            return;
-        }
-    };
-
-    let mut stream = resp.bytes_stream();
     let mut writer = tokio::io::BufWriter::new(file);
     let mut written = 0u64;
     let mut last_progress = tokio::time::Instant::now();
-    let mut abort_reason: Option<&'static str> = None;
+    let mut fatal: Option<String> = None;
+    let mut drops = 0u32;
+    let mut gap_ms = 0i64;
+    let mut last_error: Option<String> = None;
+    let mut dropped_at: Option<i64> = None;
 
-    while let Some(chunk_res) = stream.next().await {
-        let now = state.wall_ms();
-        if now >= entry.scheduled_end_ms {
+    'connect: loop {
+        if state.wall_ms() >= entry.scheduled_end_ms {
             break;
         }
-
-        // Check if cancelled
-        if let Some(curr) = state.dvr.get(&entry.id) {
-            if curr.status == RecordingStatus::Cancelled {
-                abort_reason = Some("cancelled");
+        if state.dvr.get(&entry.id).is_some_and(|curr| curr.status == RecordingStatus::Cancelled) {
+            fatal = Some("cancelled".into());
+            break;
+        }
+        let attempt_error = match client.get(&entry.stream_url).send().await {
+            Ok(r) if r.status().is_success() => {
+                if let Some(at) = dropped_at.take() {
+                    gap_ms += state.wall_ms() - at;
+                }
+                let mut stream = r.bytes_stream();
+                let mut error = None;
+                while let Some(chunk_res) = stream.next().await {
+                    if state.wall_ms() >= entry.scheduled_end_ms {
+                        break 'connect;
+                    }
+                    if state.dvr.get(&entry.id).is_some_and(|curr| curr.status == RecordingStatus::Cancelled) {
+                        fatal = Some("cancelled".into());
+                        break 'connect;
+                    }
+                    if written % (8 * 1024 * 1024) < 65536 {
+                        if let Ok(free) = crate::host::free_disk_bytes(&state.config.data_dir) {
+                            if free < crate::store::FREE_DISK_FLOOR_BYTES {
+                                fatal = Some("disk floor reached during capture".into());
+                                break 'connect;
+                            }
+                        }
+                    }
+                    match chunk_res {
+                        Ok(chunk) => {
+                            if let Err(e) = writer.write_all(&chunk).await {
+                                eprintln!("dvr write error {}: {e}", entry.id);
+                                fatal = Some(format!("disk write error: {e}"));
+                                break 'connect;
+                            }
+                            written += chunk.len() as u64;
+                            if last_progress.elapsed().as_secs() >= 5 {
+                                let _ = writer.flush().await;
+                                state.dvr.update_bytes(&entry.id, written);
+                                last_progress = tokio::time::Instant::now();
+                            }
+                        }
+                        Err(e) => {
+                            error = Some(format!("stream dropped: {e}"));
+                            break;
+                        }
+                    }
+                }
+                error.unwrap_or_else(|| "the provider ended the stream".into())
+            }
+            // A refusal of the first connection is final (wrong URL, no subscription); later
+            // it is usually the provider's connection limit, so keep trying until the end.
+            Ok(r) if written == 0 && drops == 0 => {
+                fatal = Some(format!("stream HTTP {}", r.status()));
                 break;
             }
-        }
-
-        // Periodic disk floor check
-        if written % (8 * 1024 * 1024) < 65536 {
-            if let Ok(free) = crate::host::free_disk_bytes(&state.config.data_dir) {
-                if free < crate::store::FREE_DISK_FLOOR_BYTES {
-                    abort_reason = Some("disk floor reached during capture");
-                    break;
-                }
-            }
-        }
-
-        match chunk_res {
-            Ok(chunk) => {
-                if let Err(e) = writer.write_all(&chunk).await {
-                    eprintln!("dvr write error {}: {e}", entry.id);
-                    abort_reason = Some("disk write error");
-                    break;
-                }
-                written += chunk.len() as u64;
-
-                if last_progress.elapsed().as_secs() >= 5 {
-                    let _ = writer.flush().await;
-                    state.dvr.update_bytes(&entry.id, written);
-                    last_progress = tokio::time::Instant::now();
-                }
-            }
-            Err(e) => {
-                eprintln!("dvr stream disconnected {}: {e}", entry.id);
-                abort_reason = Some("stream disconnected");
+            Ok(r) => format!("stream HTTP {}", r.status()),
+            Err(e) if written == 0 && drops == 0 => {
+                fatal = Some(format!("stream connection failed: {e}"));
                 break;
             }
+            Err(e) => format!("stream connection failed: {e}"),
+        };
+        drops += 1;
+        eprintln!("dvr {}: {attempt_error}; reconnecting (drop {drops})", entry.id);
+        last_error = Some(attempt_error);
+        dropped_at.get_or_insert(state.wall_ms());
+        let _ = writer.flush().await;
+        state.dvr.update_bytes(&entry.id, written);
+        let wait = CAPTURE_RETRY_WAITS_S[(drops as usize - 1).min(CAPTURE_RETRY_WAITS_S.len() - 1)];
+        let remaining = entry.scheduled_end_ms - state.wall_ms();
+        if remaining <= 0 {
+            break;
         }
+        tokio::time::sleep(Duration::from_millis((wait * 1000).min(remaining as u64))).await;
+    }
+    if let Some(at) = dropped_at {
+        gap_ms += state.wall_ms().min(entry.scheduled_end_ms) - at;
     }
 
     let _ = writer.flush().await;
 
-    let final_status = match abort_reason {
-        None => RecordingStatus::Finished,
-        Some("cancelled") => RecordingStatus::Cancelled,
-        Some("stream disconnected") if written > 0 => RecordingStatus::Partial,
-        Some(_) if written > 0 => RecordingStatus::Partial,
-        Some(_) => RecordingStatus::Failed,
-    };
+    let (final_status, reason) = capture_outcome(fatal, written, drops, gap_ms, last_error);
+    state.dvr.finish_recording(&entry.id, final_status, written, reason);
+}
 
-    state.dvr.finish_recording(&entry.id, final_status, written, abort_reason.map(str::to_string));
+/// The status and printable reason a capture ends with.
+fn capture_outcome(
+    fatal: Option<String>,
+    written: u64,
+    drops: u32,
+    gap_ms: i64,
+    last_error: Option<String>,
+) -> (RecordingStatus, Option<String>) {
+    let drop_note = (drops > 0).then(|| format!(
+        "{drops} stream drop{}, {} s missing; last: {}",
+        if drops == 1 { "" } else { "s" },
+        gap_ms.max(0) / 1000,
+        last_error.as_deref().unwrap_or("unknown"),
+    ));
+    match fatal {
+        Some(reason) if reason == "cancelled" => (RecordingStatus::Cancelled, Some(reason)),
+        Some(reason) => {
+            let status = if written > 0 { RecordingStatus::Partial } else { RecordingStatus::Failed };
+            let reason = match drop_note { Some(note) => format!("{reason} ({note})"), None => reason };
+            (status, Some(reason))
+        }
+        None if written == 0 => (RecordingStatus::Failed, Some(drop_note.unwrap_or_else(|| "no data received".into()))),
+        None if gap_ms > CAPTURE_GAP_PARTIAL_MS => (RecordingStatus::Partial, drop_note),
+        None => (RecordingStatus::Finished, drop_note),
+    }
 }
 
 // ---- HTTP Handlers ----------------------------------------------------------------------------
@@ -1014,4 +1080,69 @@ mod tests {
         assert!(store.get(&entries[1].id).is_none());
         assert!(store.get(&entries[2].id).is_none());
     }
+
+    #[test]
+    fn capture_outcome_names_drops_and_only_long_gaps_are_partial() {
+        let (status, reason) = capture_outcome(None, 5_000_000, 0, 0, None);
+        assert_eq!(status, RecordingStatus::Finished);
+        assert_eq!(reason, None);
+        let (status, reason) = capture_outcome(None, 5_000_000, 1, 4_000, Some("stream dropped: reset".into()));
+        assert_eq!(status, RecordingStatus::Finished);
+        assert_eq!(reason.as_deref(), Some("1 stream drop, 4 s missing; last: stream dropped: reset"));
+        let (status, _) = capture_outcome(None, 5_000_000, 3, 90_000, Some("stream HTTP 509".into()));
+        assert_eq!(status, RecordingStatus::Partial);
+        let (status, reason) = capture_outcome(Some("stream HTTP 404 Not Found".into()), 0, 0, 0, None);
+        assert_eq!(status, RecordingStatus::Failed);
+        assert_eq!(reason.as_deref(), Some("stream HTTP 404 Not Found"));
+        let (status, _) = capture_outcome(Some("cancelled".into()), 10, 0, 0, None);
+        assert_eq!(status, RecordingStatus::Cancelled);
+        let (status, reason) = capture_outcome(None, 0, 2, 30_000, Some("stream connection failed: refused".into()));
+        assert_eq!(status, RecordingStatus::Failed);
+        assert!(reason.unwrap().contains("2 stream drops"));
+    }
+
+    /// The 25 Nov 2026 failure: a live stream was cut 15 s in by a total request timeout.
+    /// Streams for 18 s, drops once, then streams again; run with `--ignored` (it takes ~24 s).
+    #[tokio::test]
+    #[ignore]
+    async fn capture_records_past_fifteen_seconds_and_reconnects_after_a_drop() {
+        use crate::state::{test_config, test_state};
+        let served = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = served.clone();
+        let app = axum::Router::new().route("/live.ts", axum::routing::get(move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                // The first connection streams for 17 s, then the "provider" drops it.
+                let started = tokio::time::Instant::now();
+                let body = futures_util::stream::unfold(0u32, move |i| async move {
+                    if n == 0 && started.elapsed() >= Duration::from_secs(17) { return None; }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![0x47u8; 188 * 10])), i + 1))
+                });
+                axum::body::Body::from_stream(body)
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = temp_dir();
+        let mut config = test_config();
+        config.data_dir = dir.0.clone();
+        let state = Arc::new(test_state(config));
+        let now = state.wall_ms();
+        let entry = state.dvr.schedule(ScheduleRequest {
+            channel_id: "c4".into(), channel_name: "Channel 4".into(), title: "Test".into(), description: None,
+            stream_url: format!("http://{addr}/live.ts"), start_ms: now, end_ms: now + 24_000, device_name: "test".into(),
+        }, 100_000).unwrap();
+        capture_stream(state.clone(), entry.clone()).await;
+        let done = state.dvr.get(&entry.id).unwrap();
+        assert_eq!(done.status, RecordingStatus::Finished, "{:?}", done.failure_reason);
+        assert!(served.load(Ordering::SeqCst) >= 2, "never reconnected");
+        // ~18 s before the drop plus the time after the reconnect: well past the old 15 s cut.
+        let ran_ms = done.actual_end_ms.unwrap() - done.actual_start_ms.unwrap();
+        assert!(ran_ms >= 23_000 && done.bytes_written > 0, "ran {ran_ms} ms, {} bytes", done.bytes_written);
+        assert!(done.failure_reason.as_deref().is_some_and(|r| r.starts_with("1 stream drop")), "{:?}", done.failure_reason);
+    }
 }
+
