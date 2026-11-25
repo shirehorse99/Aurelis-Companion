@@ -139,15 +139,26 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 fn check_same_origin(headers: &HeaderMap) -> Result<(), Response> {
+    // A request through Home Assistant's panel carries X-Ingress-Path, which HA's proxy adds and
+    // a page on another site cannot make a browser send, and HA only proxies it after checking its
+    // own login. Inside that panel some browsers send Origin: null and no Sec-Fetch-Site (older
+    // web views), which refused every edit and delete (25 Nov 2026), so for them a null origin is
+    // not a reason to refuse.
+    let origin = header_str(headers, "origin");
+    if headers.contains_key("x-ingress-path") && origin.is_none_or(|o| o.trim() == "null") {
+        return Ok(());
+    }
     status_page::same_origin_checked(
         header_str(headers, "host"),
         header_str(headers, "x-forwarded-host"),
-        header_str(headers, "origin"),
+        origin,
         header_str(headers, "referer"),
         header_str(headers, "sec-fetch-site"),
     )
     .map_err(|reason| {
-        (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], reason).into_response()
+        eprintln!("ui: refused a change: {reason} (origin {:?}, sec-fetch-site {:?}, via HA panel: {})",
+            origin, header_str(headers, "sec-fetch-site"), headers.contains_key("x-ingress-path"));
+        (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], format!("Refused: {reason}")).into_response()
     })
 }
 

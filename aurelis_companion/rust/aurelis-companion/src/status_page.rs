@@ -1274,5 +1274,26 @@ mod tests {
         assert_eq!(send("http://ha.local:8765").await.unwrap().status(), axum::http::StatusCode::SEE_OTHER);
         assert!(state.dvr.get(&rec.id).is_none());
     }
+
+    /// 25 Nov 2026: the owner's browser inside HA's panel sent Origin: null and no Sec-Fetch-Site.
+    #[tokio::test]
+    async fn a_null_origin_through_the_ha_panel_is_accepted_and_elsewhere_refused() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let state = std::sync::Arc::new(crate::state::test_state(crate::state::test_config()));
+        let app = crate::router(state);
+        let send = |ingress: bool| {
+            let mut b = Request::builder().method("POST").uri("/ui/dvr_delete")
+                .header("host", "192.168.1.60:8765").header("origin", "null")
+                .extension(axum::extract::ConnectInfo("172.30.32.2:50000".parse::<std::net::SocketAddr>().unwrap()));
+            if ingress { b = b.header("x-ingress-path", "/api/hassio_ingress/abc"); }
+            app.clone().oneshot(b.body(Body::from("id=0123456789abcdef0123456789abcdef")).unwrap())
+        };
+        // Through the panel: past both gates, to the handler's own answer.
+        assert_eq!(send(true).await.unwrap().status(), axum::http::StatusCode::NOT_FOUND);
+        // Not through the panel: refused (not an operator, and a null origin proves nothing).
+        assert_eq!(send(false).await.unwrap().status(), axum::http::StatusCode::FORBIDDEN);
+    }
 }
 
