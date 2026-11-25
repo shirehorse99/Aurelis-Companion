@@ -455,8 +455,21 @@ impl std::fmt::Display for DialGroup {
     }
 }
 
+/// The television tab a group is drawn in. A television's Entertainment tab carries the Local and
+/// Regional channels too (`EpgGroupFilter.isLocalOrRegionalForUser`), with the Local and Regional
+/// tabs as slices of it. Numbered apart, the two lists interleaved on screen: Local's first place
+/// beside Entertainment's first, and the same dial number twice in one tab (owner, 25 Nov 2026:
+/// "local and entertainment mixed and not following channel positions and numbers"). So they are
+/// ordered and numbered as one list.
+pub fn tab_category(label: &'static str) -> &'static str {
+    match label {
+        "Local" | "Regional" => "Entertainment",
+        other => other,
+    }
+}
+
 pub fn dial_group(channel: &ChannelSummary) -> DialGroup {
-    let category = resolve_aurelis_category(channel);
+    let category = tab_category(resolve_aurelis_category(channel));
     DialGroup {
         country: dial_country(channel.country_code.as_deref()),
         category,
@@ -508,6 +521,7 @@ fn channel_dial(channel: Option<&ChannelSummary>, row: Option<&ChannelOverride>)
         .and_then(aurelis_group_key)
         .and_then(|key| AURELIS_GROUPS.iter().find(|&&(group, _)| group == key).map(|&(_, label)| label))
         .unwrap_or("Others");
+    let category = tab_category(category);
     let folder = if category == "Sports Extra" { row.and_then(|row| row.sports_extra_group.clone()) } else { None };
     let country = dial_country(row.and_then(|row| row.country_code.as_deref()));
     (DialGroup { country, category, folder }, row.and_then(|row| row.channel_number))
@@ -537,7 +551,7 @@ pub struct TabRef {
 impl TabRef {
     fn dial_group(&self) -> Option<DialGroup> {
         let key = aurelis_group_key(&self.group)?;
-        let label = AURELIS_GROUPS.iter().find(|&&(k, _)| k == key)?.1;
+        let label = tab_category(AURELIS_GROUPS.iter().find(|&&(k, _)| k == key)?.1);
         Some(DialGroup {
             country: dial_country(Some(&self.country)),
             category: label,

@@ -115,11 +115,12 @@ async fn ui_unpair(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "unpairing from the status page is only allowed from Home Assistant or this machine").into_response();
     }
-    if let Err(reason) = status_page::same_origin(
+    if let Err(reason) = status_page::same_origin_checked(
         header_str(&headers, "host"),
         header_str(&headers, "x-forwarded-host"),
         header_str(&headers, "origin"),
         header_str(&headers, "referer"),
+        header_str(&headers, "sec-fetch-site"),
     ) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], reason).into_response();
     }
@@ -138,11 +139,12 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 fn check_same_origin(headers: &HeaderMap) -> Result<(), Response> {
-    status_page::same_origin(
+    status_page::same_origin_checked(
         header_str(headers, "host"),
         header_str(headers, "x-forwarded-host"),
         header_str(headers, "origin"),
         header_str(headers, "referer"),
+        header_str(headers, "sec-fetch-site"),
     )
     .map_err(|reason| {
         (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], reason).into_response()
@@ -200,11 +202,12 @@ async fn pause(State(state): State<Arc<AppState>>, peer: Option<ConnectInfo<Sock
     if !operator_request(peer, &headers) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "pausing from the status page is only allowed from Home Assistant or this machine").into_response();
     }
-    if let Err(reason) = status_page::same_origin(
+    if let Err(reason) = status_page::same_origin_checked(
         header_str(&headers, "host"),
         header_str(&headers, "x-forwarded-host"),
         header_str(&headers, "origin"),
         header_str(&headers, "referer"),
+        header_str(&headers, "sec-fetch-site"),
     ) {
         return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], reason).into_response();
     }
@@ -524,6 +527,32 @@ fn safe_lineup_redirect(raw: Option<&String>) -> String {
     }
 }
 
+/// The status page's Delete / Cancel / Stop on a DVR recording: same gate as Unpair.
+async fn ui_dvr_delete(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !operator_request(peer, &headers) {
+        return (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "forbidden").into_response();
+    }
+    if let Err(resp) = check_same_origin(&headers) { return resp; }
+    let form = parse_form(&body);
+    let Some(id) = form.get("id").map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "missing recording id").into_response();
+    };
+    let title = state.dvr.get(&id).map(|r| r.title).unwrap_or_else(|| id.clone());
+    match state.dvr.delete(&id) {
+        Ok(()) => state.push_job(&format!("dvr: '{}' removed from the status page", title.chars().take(80).collect::<String>())),
+        Err((status, reason)) => {
+            state.push_job(&format!("dvr: could not remove '{}': {reason}", title.chars().take(80).collect::<String>()));
+            return (status, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], format!("Could not remove the recording: {reason}")).into_response();
+        }
+    }
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "../")], "").into_response()
+}
+
 async fn ui_delete_channel_override(
     State(state): State<Arc<AppState>>,
     peer: Option<ConnectInfo<SocketAddr>>,
@@ -819,6 +848,7 @@ fn router(state: Arc<AppState>) -> Router {
             post(ui_save_channel_rows).layer(DefaultBodyLimit::max(1024 * 1024)),
         )
         .route("/ui/delete_channel_override", post(ui_delete_channel_override))
+        .route("/ui/dvr_delete", post(ui_dvr_delete))
         .route("/ui/tab", get(lineup_tv::get_tab))
         .route("/ui/tab_order", post(lineup_tv::post_order).layer(DefaultBodyLimit::max(1024 * 1024)))
         .route("/ui/tab_sort", post(lineup_tv::post_sort))

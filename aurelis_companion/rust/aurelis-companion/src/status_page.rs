@@ -217,7 +217,11 @@ pub fn render(view: &PageView, operator: bool) -> String {
     if view.dvr_recordings.is_empty() {
         h.push_str("<p>No recordings scheduled or saved.</p>");
     } else {
-        h.push_str("<table><tr><th>Title</th><th>Channel</th><th>Status</th><th>Size</th></tr>");
+        h.push_str(if operator {
+            "<table><tr><th>Title</th><th>Channel</th><th>Status</th><th>Size</th><th></th></tr>"
+        } else {
+            "<table><tr><th>Title</th><th>Channel</th><th>Status</th><th>Size</th></tr>"
+        });
         for r in &view.dvr_recordings {
             let size_str = if r.bytes_written > 0 {
                 format!("{:.1} MB", r.bytes_written as f64 / (1024.0 * 1024.0))
@@ -229,8 +233,23 @@ pub fn render(view: &PageView, operator: bool) -> String {
             } else {
                 format!("{:?}", r.status)
             };
+            // Why a recording stopped, so a Partial or Failed one says what happened.
+            let why = r.failure_reason.as_deref().map(|w| format!("<div class=\"job-meta\">{}</div>", escape(w))).unwrap_or_default();
+            let action = if !operator {
+                String::new()
+            } else {
+                let (label, ask) = match r.status {
+                    crate::dvr::RecordingStatus::Scheduled => ("Cancel", "Cancel this scheduled recording?"),
+                    crate::dvr::RecordingStatus::Recording => ("Stop", "Stop this recording? What has been recorded is kept, marked Cancelled."),
+                    _ => ("Delete", "Delete this recording and its file? This cannot be undone."),
+                };
+                format!(
+                    "<td><form method=\"post\" action=\"ui/dvr_delete\" data-ask=\"{}\" onsubmit=\"return confirm(this.dataset.ask)\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button type=\"submit\">{label}</button></form></td>",
+                    escape(&format!("{ask} ({})", r.title)), escape(&r.id),
+                )
+            };
             h.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}{why}</td><td>{}</td>{action}</tr>",
                 escape(&r.title),
                 escape(&r.channel_name),
                 escape(&status_str),
@@ -1040,6 +1059,27 @@ fn authority(url: &str) -> Option<String> {
 /// `Referer` is present (not a browser) or when whichever is present names the same host the
 /// request was addressed to. `forwarded_host` is the proxy's name for it (ingress); a
 /// cross-site page cannot set that header, so accepting it opens nothing.
+/// [`same_origin`], also reading the browser's own `Sec-Fetch-Site`, which a page cannot set.
+///
+/// Inside Home Assistant's panel the browser sends `Origin: null` with no referrer (a
+/// no-referrer policy turns the origin of a form post or fetch into "null"), so every edit and
+/// delete was refused with "the request's origin 'null' does not name a host" (25 Nov 2026).
+/// A browser that says `same-origin` is believed; one that says `cross-site` or `same-site` is
+/// refused whatever the origin; one that sends nothing falls back to the origin check.
+pub fn same_origin_checked(
+    host: Option<&str>,
+    forwarded_host: Option<&str>,
+    origin: Option<&str>,
+    referer: Option<&str>,
+    sec_fetch_site: Option<&str>,
+) -> Result<(), String> {
+    match sec_fetch_site.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("same-origin") => Ok(()),
+        Some(site @ ("cross-site" | "same-site")) => Err(format!("cross-site request refused: the browser marked it {site}")),
+        _ => same_origin(host, forwarded_host, origin, referer),
+    }
+}
+
 pub fn same_origin(host: Option<&str>, forwarded_host: Option<&str>, origin: Option<&str>, referer: Option<&str>) -> Result<(), String> {
     let claimed = match (origin, referer) {
         (None, None) => return Ok(()),
@@ -1196,10 +1236,43 @@ mod tests {
         assert!(same_origin(host, None, None, Some("http://nuc.local:8765/")).is_ok());
         assert!(same_origin(host, None, Some("http://evil.example"), None).is_err());
         assert!(same_origin(host, None, Some("null"), None).is_err());
+        // Home Assistant's panel: Origin null, but the browser attests the request is same-origin.
+        assert!(same_origin_checked(host, None, Some("null"), None, Some("same-origin")).is_ok());
+        assert!(same_origin_checked(host, None, Some("null"), None, None).is_err());
+        assert!(same_origin_checked(host, None, Some("http://nuc.local:8765"), None, Some("cross-site")).is_err());
+        assert!(same_origin_checked(host, None, Some("http://nuc.local:8765"), None, Some("none")).is_ok());
         // Origin outranks a friendly Referer
         assert!(same_origin(host, None, Some("http://evil.example"), Some("http://nuc.local:8765/")).is_err());
         // ingress: the browser's host is the proxy's, named in X-Forwarded-Host
         assert!(same_origin(Some("172.30.32.2:8099"), Some("ha.local:8123"), Some("http://ha.local:8123"), None).is_ok());
         assert!(same_origin(host, None, Some("http://nuc.local:9999"), None).is_err());
     }
+
+    #[tokio::test]
+    async fn a_recording_can_be_removed_from_the_status_page() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let dir = crate::household::TempDir::new();
+        let mut config = crate::state::test_config();
+        config.data_dir = dir.0.clone();
+        let state = std::sync::Arc::new(crate::state::test_state(config));
+        let now = crate::state::now_ms();
+        let rec = state.dvr.schedule(crate::dvr::ScheduleRequest {
+            channel_id: "c4".into(), channel_name: "Channel 4".into(), title: "Help! We Bought a Village".into(), description: None,
+            stream_url: "http://example.invalid/x.ts".into(), start_ms: now + 3_600_000, end_ms: now + 7_200_000, device_name: "tv".into(),
+        }, 100_000).unwrap();
+        let html = render(&state.page_view(), true);
+        assert!(html.contains("action=\"ui/dvr_delete\"") && html.contains("Cancel this scheduled recording?"));
+        assert!(!render(&state.page_view(), false).contains("ui/dvr_delete"), "read-only viewers get no button");
+        let app = crate::router(state.clone());
+        let send = |origin: &'static str| app.clone().oneshot(Request::builder().method("POST").uri("/ui/dvr_delete")
+            .header("host", "ha.local:8765").header("origin", origin)
+            .extension(axum::extract::ConnectInfo("127.0.0.1:8765".parse::<std::net::SocketAddr>().unwrap()))
+            .body(Body::from(format!("id={}", rec.id))).unwrap());
+        assert_eq!(send("http://evil.example").await.unwrap().status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(send("http://ha.local:8765").await.unwrap().status(), axum::http::StatusCode::SEE_OTHER);
+        assert!(state.dvr.get(&rec.id).is_none());
+    }
 }
+

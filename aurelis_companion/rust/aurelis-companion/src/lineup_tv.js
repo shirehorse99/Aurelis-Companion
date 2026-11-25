@@ -135,6 +135,7 @@
     const name = el("button", { type: "button", class: "ch-name", title: editor ? "Edit " + c.name : c.name, onclick: editor ? () => toggleEdit(c.id) : null, disabled: !editor },
       c.name);
     const meta = [];
+    if (c.kind) meta.push(el("span", { class: "badge", title: "Shown here because the televisions put " + c.kind + " channels in Entertainment; they also appear in the " + c.kind + " tab, in this order.", text: c.kind }));
     if (c.hidden) meta.push(el("span", { class: "badge pending", text: "Hidden" }));
     if (c.originalName) meta.push(el("span", { class: "job-meta", text: "was " + c.originalName }));
     if (c.edited) meta.push(el("span", { class: "badge edited", text: "Edited" }));
