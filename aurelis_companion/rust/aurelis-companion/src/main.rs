@@ -896,6 +896,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/ui/tab", get(lineup_tv::get_tab))
         .route("/ui/tab_order", post(lineup_tv::post_order).layer(DefaultBodyLimit::max(1024 * 1024)))
         .route("/ui/tab_sort", post(lineup_tv::post_sort))
+        .route("/ui/country_order", post(lineup_tv::post_country_order))
         .route("/ui/channel_edit", post(lineup_tv::post_edit).layer(DefaultBodyLimit::max(64 * 1024)))
         .route("/ui/assign_numbers", post(ui_assign_numbers))
         .route(

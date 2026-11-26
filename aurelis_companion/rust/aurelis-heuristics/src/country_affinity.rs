@@ -58,6 +58,18 @@ static US_TIMEZONE_FEED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static NAME_FEED_TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(^|[^A-Za-z0-9])(NZL|AUS|ZAF|RSA|USA|CAN|HKG|NZ|AU|ZA|US|CA|UK|GB|IE|HK|DEU|GER|DE|FRA|FR|ESP|ES|ITA|IT|NED|NL|PT|POR|AT|AUT|CH|SUI|BE|PL|SE|NO|DK|FI|IN|JPN|JP|KOR|KR|BRA|BR|MEX|MX|ARG|AR)([^A-Za-z]|$)").unwrap()
 });
+/// "Sci-Fi", "Sci Fi", "SciFi": the genre, never Finland. Read as "FI", it put "Sky Sci-Fi" in
+/// Finland while a copy named "UK: Sky Sci-Fi" stayed British, so the arbiter kept one channel as
+/// three (26 Nov 2026). Mirrors `CountryAffinity.SCI_FI` in Kotlin.
+static SCI_FI_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bsci[\s\-_./]*fi\b").unwrap()
+});
+
+/// `text` with every "Sci-Fi" spelling made the one word "scifi".
+pub fn without_sci_fi(text: &str) -> std::borrow::Cow<'_, str> {
+    SCI_FI_REGEX.replace_all(text, "scifi")
+}
+
 static FIVE_USA_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\d\s*USA\b").unwrap()
 });
@@ -386,7 +398,7 @@ fn display_name_prefix(text: &str) -> Option<CountryInfo> {
 pub fn country_for_text(text: &str) -> Option<CountryInfo> {
     if text.trim().is_empty() { return None; }
     if let Some(c) = country_from_playlist_prefix(text) { return Some(c); }
-    let n = format!(" {} ", text.to_lowercase().trim());
+    let n = format!(" {} ", without_sci_fi(text).to_lowercase().trim());
     let mut best: Option<CountryInfo> = None;
     let mut best_score = 0;
     for info in countries() {
@@ -404,6 +416,8 @@ pub fn country_for_name(text: &str) -> Option<CountryInfo> { country_for_text(te
 
 pub fn country_from_name_hint(channel_name: &str) -> Option<CountryInfo> {
     if channel_name.trim().is_empty() { return None; }
+    let cleaned = without_sci_fi(channel_name);
+    let channel_name: &str = &cleaned;
     for caps in NAME_FEED_TAG_REGEX.captures_iter(channel_name) {
         // Leading `UK: …` / `CA| …` is a playlist prefix, not a feed tag — see Kotlin twin.
         if is_leading_playlist_country_prefix(channel_name, &caps) { continue; }
@@ -669,3 +683,21 @@ mod us_broadcaster_tests {
         assert!(!is_us_broadcaster("TNT Latin America"));
     }
 }
+
+#[cfg(test)]
+mod sci_fi_is_not_finland {
+    use super::*;
+
+    #[test]
+    fn sci_fi_in_any_spelling_names_no_country() {
+        for name in ["Sky Sci-Fi", "Sky Sci-Fi HD", "Sky SciFi", "Sky Sci Fi FHD", "Sky Cinema Sci-Fi Horror", "SCI-FI Channel"] {
+            assert_eq!(country_from_name_hint(name).map(|c| c.code), None, "{name}");
+            assert_ne!(detect_for_channel(name, "ENTERTAINMENT").map(|c| c.code), Some("FI"), "{name}");
+        }
+        // A UK folder still says GB, and Finland is still Finland.
+        assert_eq!(detect_for_channel("Sky Sci-Fi", "UK: Entertainment").map(|c| c.code), Some("GB"));
+        assert_eq!(detect_for_channel("Yle TV1 FI", "").map(|c| c.code), Some("FI"));
+        assert_eq!(detect_for_channel("MTV3 (FI)", "").map(|c| c.code), Some("FI"));
+    }
+}
+

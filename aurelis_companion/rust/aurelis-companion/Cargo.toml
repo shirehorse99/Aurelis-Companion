@@ -1,6 +1,6 @@
 [package]
 name = "aurelis-companion"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2021"
 description = "Aurelis Companion: an optional helper server for Aurelis TV boxes (Home Assistant add-on and Docker image)."
 

@@ -80,8 +80,30 @@
     return call("ui/tab_order", Object.assign(tabRef(), { ids: order }));
   }
 
+  function drawCountryOrder(countries) {
+    const box = $("country-order");
+    if (!box) return;
+    if (countries.length < 2) { box.replaceChildren(); return; }
+    const move = (i, by) => {
+      const order = countries.slice();
+      const [c] = order.splice(i, 1);
+      order.splice(i + by, 0, c);
+      call("ui/country_order", Object.assign(tabRef(), { order }));
+    };
+    box.replaceChildren(
+      el("span", { class: "job-meta", text: "Country order:" }),
+      ...countries.map((c, i) => el("span", { class: "country-chip" },
+        editor ? el("button", { type: "button", class: "mv", title: "Earlier", "aria-label": "Move " + c + " earlier", disabled: i === 0, onclick: () => move(i, -1) }, "◀") : null,
+        el("strong", { text: c === "UNKNOWN" ? "None" : c }),
+        editor ? el("button", { type: "button", class: "mv", title: "Later", "aria-label": "Move " + c + " later", disabled: i === countries.length - 1, onclick: () => move(i, 1) }, "▶") : null,
+      )),
+      el("span", { class: "job-meta", text: "Each television always puts its own home country first, then this order." }),
+    );
+  }
+
   function drawPickers() {
     const countries = [...new Set(data.tabs.map((t) => t.country))];
+    drawCountryOrder(countries.filter((c) => c !== "UNKNOWN"));
     const sel = $("country");
     sel.replaceChildren(...countries.map((c) => el("option", { value: c, text: c === "UNKNOWN" ? "No country" : c, selected: data.tab && c === data.tab.country })));
     sel.onchange = () => {
@@ -154,7 +176,8 @@
     }
     const li = el("li", { class: "tv-row" + (c.hidden ? " is-hidden" : ""), "data-id": c.id, draggable: editor ? "true" : false },
       editor ? el("span", { class: "grip", "aria-hidden": "true", text: "⠿" }) : null,
-      el("span", { class: "dial", text: c.number != null ? String(c.number) : "–" }),
+      // Dial numbers are per country: Britain's 101 is not Australia's 101.
+      el("span", { class: "dial", text: c.number != null ? ((data.tab && data.tab.country !== "UNKNOWN" ? data.tab.country + " " : "") + c.number) : "–" }),
       c.logo ? el("img", { class: "ch-logo", src: c.logo, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : el("span", { class: "ch-logo" }),
       el("span", { class: "ch-main" }, name, el("span", { class: "ch-meta" }, ...meta)),
     );

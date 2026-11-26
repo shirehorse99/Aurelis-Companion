@@ -25,6 +25,7 @@ const OVERRIDES_FILE: &str = "lineup_overrides.json";
 /// How long a reported channel stays in the editor without any television reporting it again.
 pub const STALE_CHANNEL_MS: i64 = 21 * 24 * 3600 * 1000;
 const CHANNELS_FILE: &str = "lineup_channels.json";
+const COUNTRY_ORDER_FILE: &str = "lineup_country_order.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +172,8 @@ pub const LIST_SORTS: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub struct ServedLineup {
     pub overrides: Vec<ChannelOverride>,
+    /// The household's order of countries; each television puts its own home country first.
+    pub country_order: Vec<String>,
     pub etag: String,
 }
 
@@ -534,6 +537,8 @@ pub struct LineupStore {
     /// Bumped on every write to either map; the served lineup is rebuilt when it moves.
     generation: AtomicU64,
     served: Mutex<Option<(u64, Arc<ServedLineup>)>>,
+    /// The household's order of countries (see [`ServedLineup::country_order`]).
+    country_order: Mutex<Vec<String>>,
     wall: WallClock,
 }
 
@@ -664,6 +669,7 @@ fn display_order_key(channel: &ChannelSummary) -> (bool, Option<i32>, String, St
 fn compute_served(
     channels: &HashMap<String, ChannelSummary>,
     overrides: &HashMap<String, ChannelOverride>,
+    country_order: &[String],
 ) -> ServedLineup {
     let mut rows = overrides.clone();
     let mut groups: HashMap<DialGroup, Vec<ChannelSummary>> = HashMap::new();
@@ -695,8 +701,16 @@ fn compute_served(
     }
     let mut overrides: Vec<ChannelOverride> = rows.into_values().filter(|row| !row.is_empty()).collect();
     overrides.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
-    let etag = compute_overrides_etag(&overrides);
-    ServedLineup { overrides, etag }
+    let mut etag = compute_overrides_etag(&overrides);
+    if !country_order.is_empty() {
+        // A new order is a new lineup to the televisions.
+        let mut hasher = Sha256::new();
+        hasher.update(etag.as_bytes());
+        hasher.update(country_order.join(",").as_bytes());
+        let digest = hasher.finalize();
+        etag = format!("v1-{}", digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    ServedLineup { overrides, country_order: country_order.to_vec(), etag }
 }
 
 fn compute_overrides_etag(list: &[ChannelOverride]) -> String {
@@ -720,6 +734,7 @@ fn compute_overrides_etag(list: &[ChannelOverride]) -> String {
 impl LineupStore {
     pub fn new(dir: PathBuf, wall: WallClock) -> Self {
         let _ = std::fs::create_dir_all(&dir);
+        let dir_for_order = dir.clone();
 
         let overrides_map = {
             let path = dir.join(OVERRIDES_FILE);
@@ -754,6 +769,11 @@ impl LineupStore {
             channels,
             generation: AtomicU64::new(0),
             served: Mutex::new(None),
+            country_order: Mutex::new(
+                std::fs::read(dir_for_order.join(COUNTRY_ORDER_FILE)).ok()
+                    .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+                    .unwrap_or_default(),
+            ),
             wall,
         }
     }
@@ -773,10 +793,35 @@ impl LineupStore {
         let served = {
             let channels = self.channels.lock().unwrap();
             let overrides = self.overrides.lock().unwrap();
-            Arc::new(compute_served(&channels, &overrides))
+            let order = self.country_order.lock().unwrap().clone();
+            Arc::new(compute_served(&channels, &overrides, &order))
         };
         *self.served.lock().unwrap() = Some((generation, served.clone()));
         served
+    }
+
+    /// The household's country order, as saved.
+    pub fn country_order(&self) -> Vec<String> {
+        self.country_order.lock().unwrap().clone()
+    }
+
+    /// Save the household's country order: two-letter codes, first to last, no repeats.
+    pub fn set_country_order(&self, order: &[String]) -> Result<Vec<String>, String> {
+        let mut clean: Vec<String> = Vec::new();
+        for raw in order {
+            let code = dial_country(Some(raw));
+            if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+                return Err(format!("'{raw}' is not a two-letter country code."));
+            }
+            if !clean.contains(&code) {
+                clean.push(code);
+            }
+        }
+        let bytes = serde_json::to_vec(&clean).map_err(|e| e.to_string())?;
+        write_atomic(&self.dir, COUNTRY_ORDER_FILE, &bytes)?;
+        *self.country_order.lock().unwrap() = clean.clone();
+        self.invalidate_served();
+        Ok(clean)
     }
 
     fn invalidate_served(&self) {
@@ -1284,8 +1329,11 @@ impl LineupStore {
             }
         }
         let order = |label: &str| AURELIS_GROUPS.iter().position(|&(_, l)| l == label).unwrap_or(usize::MAX);
+        let countries = self.country_order.lock().unwrap().clone();
+        let country_rank = |c: &str| countries.iter().position(|x| x == c).unwrap_or(usize::MAX);
         let mut list: Vec<TabSummary> = tabs.into_values().collect();
-        list.sort_by(|a, b| a.country.cmp(&b.country)
+        list.sort_by(|a, b| country_rank(&a.country).cmp(&country_rank(&b.country))
+            .then_with(|| a.country.cmp(&b.country))
             .then_with(|| order(a.label).cmp(&order(b.label)))
             .then_with(|| a.folder.cmp(&b.folder)));
         list
@@ -1876,6 +1924,7 @@ pub async fn handle_get_overrides(
         StatusCode::OK,
         serde_json::json!({
             "overrides": overrides,
+            "countryOrder": served.country_order,
             "updatedAtMs": updated_at_ms,
             "etag": etag,
         }),

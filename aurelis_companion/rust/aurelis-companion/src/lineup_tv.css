@@ -43,3 +43,7 @@ body.saving .tv-list { opacity: .7; pointer-events: none; }
 }
 .group-chips.folders { margin: -.25rem 0 .75rem; padding-left: .5rem; border-left: 3px solid var(--border); align-items: center; }
 .badge.twin { background: color-mix(in srgb, #8e6bd5 22%, Canvas); border: 1px solid #8e6bd5; }
+.country-order { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .25rem 0 .75rem; }
+.country-chip { display: inline-flex; align-items: center; gap: .25rem; padding: .15rem .3rem; border: 1px solid var(--border); border-radius: .4rem; background: Canvas; }
+.country-chip .mv { min-width: 1.8rem; min-height: 1.8rem; }
+.dial { min-width: 4.2rem; }

@@ -65,11 +65,38 @@ fn tab_json(store: &LineupStore, tab: &TabRef) -> Value {
     match store.tab_channels(tab) {
         Some(view) => json!({
             "ok": true,
+            "countryOrder": store.country_order(),
             "tab": view.tab,
             "channels": view.channels.iter().map(|ch| channel_json(ch, &view)).collect::<Vec<_>>(),
             "tabs": tabs,
         }),
-        None => json!({ "ok": true, "tab": null, "channels": [], "tabs": tabs }),
+        None => json!({ "ok": true, "countryOrder": store.country_order(), "tab": null, "channels": [], "tabs": tabs }),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountryOrderRequest {
+    #[serde(flatten)]
+    tab: TabRef,
+    order: Vec<String>,
+}
+
+/// The household's order of countries; every television puts its own home country first.
+pub async fn post_country_order(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = guard(peer, &headers) { return resp; }
+    let req: CountryOrderRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => return refuse(format!("Unreadable request: {e}")),
+    };
+    match state.lineup.set_country_order(&req.order) {
+        Ok(order) => saved(&state, &req.tab, format!("Country order saved: {}. Each television still puts its own home country first.", order.join(", "))),
+        Err(e) => refuse(e),
     }
 }
 
@@ -382,7 +409,7 @@ pub fn render(view: &crate::state::PageView, store: &LineupStore, editor: bool, 
     h.push_str("<nav class=\"nav-tabs\"><a href=\"./\" class=\"nav-tab\">System Status</a><a href=\"lineup\" class=\"nav-tab active\">Channels</a><a href=\"lineup?view=table\" class=\"nav-tab\">Spreadsheet view</a></nav>");
     h.push_str("<section class=\"tv-editor\">");
     h.push_str(&format!("<div class=\"sync-strip\"><span class=\"job-meta\">Televisions:</span>{sync}</div>"));
-    h.push_str("<div class=\"tv-pickers\"><label>Country <select id=\"country\"></select></label><div id=\"groups\" class=\"group-chips\" role=\"tablist\" aria-label=\"Groups\"></div></div><div id=\"folders\" class=\"group-chips folders\" hidden></div>");
+    h.push_str("<div class=\"tv-pickers\"><label>Country <select id=\"country\"></select></label><div id=\"groups\" class=\"group-chips\" role=\"tablist\" aria-label=\"Groups\"></div></div><div id=\"folders\" class=\"group-chips folders\" hidden></div><div id=\"country-order\" class=\"country-order\"></div>");
     h.push_str("<div id=\"tab-status\" class=\"tab-status\"></div>");
     if editor {
         h.push_str("<div id=\"tab-tools\" class=\"tab-tools\"><button type=\"button\" data-sort=\"name\">Sort A to Z</button><button type=\"button\" data-sort=\"provider\">Sort by provider number</button><button type=\"button\" data-sort=\"release\" class=\"quiet\">Hand back to automatic order</button><input id=\"find\" type=\"search\" placeholder=\"Find in this group\" aria-label=\"Find in this group\"></div>");
@@ -620,6 +647,32 @@ mod tests {
         let state = state_with(json!([{"id":"x", "name":"</script><b>", "countryCode":"GB", "aurelisCategory":"NEWS"}]));
         let html = render(&state.page_view(), &state.lineup, true, &PageQuery::default());
         assert!(!html.contains("</script><b>"));
+    }
+
+    #[tokio::test]
+    async fn the_household_country_order_is_saved_served_and_orders_the_tabs() {
+        let state = state_with(json!([
+            {"id":"bbc1", "name":"BBC One", "countryCode":"GB", "aurelisCategory":"ENTERTAINMENT"},
+            {"id":"nine", "name":"Channel 9", "countryCode":"AU", "aurelisCategory":"ENTERTAINMENT"},
+            {"id":"cbs", "name":"CBS", "countryCode":"US", "aurelisCategory":"ENTERTAINMENT"}
+        ]));
+        let before = state.lineup.overrides_etag();
+        let app = crate::router(state.clone());
+        let r = app.clone().oneshot(HttpRequest::builder().method("POST").uri("/ui/country_order")
+            .header("host", "ha.local:8765").header("origin", "http://ha.local:8765").header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo("127.0.0.1:8765".parse::<SocketAddr>().unwrap()))
+            .body(Body::from(json!({"country":"GB","group":"ENTERTAINMENT","order":["us","AU","GB","US"]}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(state.lineup.country_order(), ["US", "AU", "GB"]);
+        // The tabs follow it, and the televisions see a changed lineup carrying it.
+        let countries: Vec<String> = state.lineup.tabs().into_iter().map(|t| t.country).collect();
+        assert_eq!(countries, ["US", "AU", "GB"]);
+        assert_ne!(state.lineup.overrides_etag(), before);
+        assert_eq!(state.lineup.served_lineup().country_order, ["US", "AU", "GB"]);
+        // Kept across a restart.
+        let again = LineupStore::new(state.config.data_dir.clone(), std::sync::Arc::new(crate::state::now_ms));
+        assert_eq!(again.country_order(), ["US", "AU", "GB"]);
+        assert!(state.lineup.set_country_order(&["Britain".into()]).is_err());
     }
 }
 
