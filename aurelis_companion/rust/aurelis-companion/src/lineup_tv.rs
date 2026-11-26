@@ -390,7 +390,7 @@ pub fn render(view: &crate::state::PageView, store: &LineupStore, editor: bool, 
     for d in devices {
         let up = d.synced_lineup_etag.as_deref() == Some(view.lineup_etag.as_str());
         sync.push_str(&format!(
-            "<span class=\"sync-chip\"><strong>{}</strong><span class=\"badge {}\">{}</span></span>",
+            "<div class=\"sync-row\"><span>{}</span><span class=\"badge {}\">{}</span></div>",
             escape(&d.name), if up { "done" } else { "pending" }, if up { "Up to date" } else { "Updating…" },
         ));
     }
@@ -404,21 +404,32 @@ pub fn render(view: &crate::state::PageView, store: &LineupStore, editor: bool, 
     h.push_str(&format!("<title>Channels - {PRODUCT_NAME}</title><style>"));
     h.push_str(include_str!("status_page.css"));
     h.push_str(include_str!("lineup_tv.css"));
-    h.push_str("</style></head><body><main>");
+    h.push_str("</style></head><body><main class=\"tv-page\">");
     h.push_str(&format!("<h1>{PRODUCT_NAME}</h1>"));
     h.push_str("<nav class=\"nav-tabs\"><a href=\"./\" class=\"nav-tab\">System Status</a><a href=\"lineup\" class=\"nav-tab active\">Channels</a><a href=\"lineup?view=table\" class=\"nav-tab\">Spreadsheet view</a></nav>");
-    h.push_str("<section class=\"tv-editor\">");
-    h.push_str(&format!("<div class=\"sync-strip\"><span class=\"job-meta\">Televisions:</span>{sync}</div>"));
-    h.push_str("<div class=\"tv-pickers\"><label>Country <select id=\"country\"></select></label><div id=\"groups\" class=\"group-chips\" role=\"tablist\" aria-label=\"Groups\"></div></div><div id=\"folders\" class=\"group-chips folders\" hidden></div><div id=\"country-order\" class=\"country-order\"></div>");
-    h.push_str("<div id=\"tab-status\" class=\"tab-status\"></div>");
+    h.push_str("<div class=\"tv-layout\">");
+    // Left: where you are (country and group), and the household settings that rarely change.
+    h.push_str("<aside class=\"tv-side\">");
+    h.push_str("<label class=\"side-field\">Country <select id=\"country\"></select></label>");
+    h.push_str("<label class=\"side-field group-select\">Group <select id=\"group-select\"></select></label>");
+    h.push_str("<nav id=\"groups\" class=\"group-list\" aria-label=\"Groups\"></nav>");
+    h.push_str("<details class=\"side-box\"><summary>Country order</summary><div id=\"country-order\" class=\"country-order\"></div></details>");
+    h.push_str(&format!("<details class=\"side-box\"><summary>Televisions</summary><div class=\"sync-list\">{sync}</div></details>"));
+    h.push_str("</aside>");
+    // Right: the group as a television draws it.
+    h.push_str("<section class=\"tv-main\">");
+    h.push_str("<div class=\"tv-head\"><div id=\"tab-status\" class=\"tab-status\"></div>");
     if editor {
-        h.push_str("<div id=\"tab-tools\" class=\"tab-tools\"><button type=\"button\" data-sort=\"name\">Sort A to Z</button><button type=\"button\" data-sort=\"provider\">Sort by provider number</button><button type=\"button\" data-sort=\"release\" class=\"quiet\">Hand back to automatic order</button><input id=\"find\" type=\"search\" placeholder=\"Find in this group\" aria-label=\"Find in this group\"></div>");
-        h.push_str("<p class=\"job-meta\">Drag a channel, or use ▲ ▼, to top, to bottom or #. Click a name to rename, hide, move group or change its number. Everything saves as you do it.</p>");
+        h.push_str("<div id=\"tab-tools\" class=\"tab-tools\"><input id=\"find\" type=\"search\" placeholder=\"Find in this group\" aria-label=\"Find in this group\"><select id=\"group-action\" aria-label=\"Re-order this group\"><option value=\"\">Re-order this group…</option><option value=\"name\">Sort A to Z</option><option value=\"provider\">Sort by provider number</option><option value=\"release\">Hand back to automatic order</option></select></div>");
     } else {
         h.push_str("<p class=\"job-meta\">Read only: open this page from Home Assistant to make changes.</p>");
     }
+    h.push_str("</div>");
     h.push_str("<ol id=\"list\" class=\"tv-list\"></ol>");
-    h.push_str("</section><div id=\"toast\" class=\"toast\" role=\"status\" aria-live=\"polite\"></div></main>");
+    if editor {
+        h.push_str("<p class=\"job-meta hint\">Drag a channel or use ▲ ▼. ⋯ (or the name) opens a channel: rename, hide, move group, dial number, to top or bottom. Every change saves at once.</p>");
+    }
+    h.push_str("</section></div><div id=\"toast\" class=\"toast\" role=\"status\" aria-live=\"polite\"></div></main>");
     h.push_str("<script>const BOOT=");
     // Inside <script>, a "</" in data would end the element early.
     h.push_str(&boot.to_string().replace("</", "<\\/"));

@@ -83,7 +83,7 @@
   function drawCountryOrder(countries) {
     const box = $("country-order");
     if (!box) return;
-    if (countries.length < 2) { box.replaceChildren(); return; }
+    if (countries.length < 2) { box.replaceChildren(el("p", { class: "job-meta", text: "Only one country so far." })); return; }
     const move = (i, by) => {
       const order = countries.slice();
       const [c] = order.splice(i, 1);
@@ -91,13 +91,12 @@
       call("ui/country_order", Object.assign(tabRef(), { order }));
     };
     box.replaceChildren(
-      el("span", { class: "job-meta", text: "Country order:" }),
-      ...countries.map((c, i) => el("span", { class: "country-chip" },
-        editor ? el("button", { type: "button", class: "mv", title: "Earlier", "aria-label": "Move " + c + " earlier", disabled: i === 0, onclick: () => move(i, -1) }, "◀") : null,
-        el("strong", { text: c === "UNKNOWN" ? "None" : c }),
-        editor ? el("button", { type: "button", class: "mv", title: "Later", "aria-label": "Move " + c + " later", disabled: i === countries.length - 1, onclick: () => move(i, 1) }, "▶") : null,
-      )),
-      el("span", { class: "job-meta", text: "Each television always puts its own home country first, then this order." }),
+      el("p", { class: "job-meta", text: "Each television puts its own home country first, then this order." }),
+      el("ol", { class: "country-list" }, ...countries.map((c, i) => el("li", {},
+        el("span", { class: "cc-name", text: c }),
+        editor ? el("button", { type: "button", class: "mv small", "aria-label": "Move " + c + " up", disabled: i === 0, onclick: () => move(i, -1) }, "▲") : null,
+        editor ? el("button", { type: "button", class: "mv small", "aria-label": "Move " + c + " down", disabled: i === countries.length - 1, onclick: () => move(i, 1) }, "▼") : null,
+      ))),
     );
   }
 
@@ -112,43 +111,55 @@
     };
     const here = data.tabs.filter((t) => data.tab && t.country === data.tab.country);
     const isActive = (t) => data.tab && t.group === data.tab.group && (t.folder || "") === (data.tab.folder || "");
-    const chip = (t, label, count, active) => el("button", { type: "button", role: "tab", "aria-selected": active ? "true" : "false", class: "chip" + (active ? " active" : ""), onclick: () => reload(t) },
-      label, el("span", { class: "count", text: String(count) }));
-    const extras = here.filter((t) => t.group === "SPORT_EXTRA");
-    const chips = [];
+    const label = (t) => t.folder ? t.folder.replace(/::/g, " / ") : t.label;
+    // The groups as the television lists them; Sports Extra's folders sit under it.
+    const items = [];
+    const options = [];
     let extraShown = false;
     for (const t of here) {
-      if (t.group !== "SPORT_EXTRA") { chips.push(chip(t, t.label, t.count - t.hidden, isActive(t))); continue; }
-      if (extraShown) continue;
-      extraShown = true;
-      const total = extras.reduce((n, x) => n + x.count - x.hidden, 0);
-      chips.push(chip(extras[0], "Sports Extra", total, data.tab.group === "SPORT_EXTRA"));
+      const count = t.count - t.hidden;
+      if (t.group === "SPORT_EXTRA") {
+        if (!extraShown) {
+          extraShown = true;
+          const extras = here.filter((x) => x.group === "SPORT_EXTRA");
+          const total = extras.reduce((n, x) => n + x.count - x.hidden, 0);
+          items.push(el("div", { class: "group-heading" }, "Sports Extra", el("span", { class: "count", text: String(total) })));
+        }
+        items.push(el("button", { type: "button", class: "group-item sub" + (isActive(t) ? " active" : ""), "aria-current": isActive(t) ? "true" : false, onclick: () => reload(t) },
+          el("span", { text: t.folder ? label(t) : "No folder" }), el("span", { class: "count", text: String(count) })));
+        options.push(el("option", { value: String(here.indexOf(t)), selected: isActive(t), text: "Sports Extra / " + (t.folder ? label(t) : "No folder") + " (" + count + ")" }));
+        continue;
+      }
+      items.push(el("button", { type: "button", class: "group-item" + (isActive(t) ? " active" : ""), "aria-current": isActive(t) ? "true" : false, onclick: () => reload(t) },
+        el("span", { text: t.label }), el("span", { class: "count", text: String(count) })));
+      options.push(el("option", { value: String(here.indexOf(t)), selected: isActive(t), text: t.label + " (" + count + ")" }));
     }
-    const folderRow = $("folders");
-    if (data.tab && data.tab.group === "SPORT_EXTRA" && extras.length > 1) {
-      folderRow.hidden = false;
-      folderRow.replaceChildren(el("span", { class: "job-meta", text: "Folder:" }),
-        ...extras.map((t) => chip(t, t.folder ? t.folder.replace(/::/g, " / ") : "No folder", t.count - t.hidden, isActive(t))));
-    } else {
-      folderRow.hidden = true;
-      folderRow.replaceChildren();
-    }
-    $("groups").replaceChildren(...chips);
+    $("groups").replaceChildren(...items);
+    const gsel = $("group-select");
+    gsel.replaceChildren(...options);
+    gsel.onchange = () => { const t = here[parseInt(gsel.value, 10)]; if (t) reload(t); };
   }
 
   function drawStatus() {
     const s = $("tab-status");
     if (!data.tab) { s.textContent = "No channels have been reported by a television yet."; return; }
     const shown = data.tab.count - data.tab.hidden;
-    const hiddenNote = data.tab.hidden ? " · " + data.tab.hidden + " hidden (greyed out below)" : "";
+    const title = (data.tab.folder ? "Sports Extra / " + data.tab.folder.replace(/::/g, " / ") : data.tab.label)
+      + " · " + (data.tab.country === "UNKNOWN" ? "No country" : data.tab.country);
     s.replaceChildren(
-      el("strong", { text: shown + " channels on the televisions" + hiddenNote }),
-      el("span", { class: "badge " + (data.tab.managed ? "done" : "pending"), text: data.tab.managed ? "Your order" : "Automatic order" }),
-      el("span", { class: "job-meta", text: data.tab.managed
-        ? "Every television shows this group exactly in this order."
-        : "Each television sorts this group itself; shown here as closely as the Companion can (a box may also lift its most-watched channels). Move any channel to fix the order for every television." }),
+      el("h2", { text: title }),
+      el("div", { class: "tab-facts" },
+        el("span", { text: shown + " on the televisions" + (data.tab.hidden ? ", " + data.tab.hidden + " hidden" : "") }),
+        el("span", {
+          class: "badge " + (data.tab.managed ? "done" : "pending"),
+          title: data.tab.managed
+            ? "Every television shows this group exactly in this order."
+            : "Each television sorts this group itself; this is as close as the Companion can show it. Move any channel to fix the order for every television.",
+          text: data.tab.managed ? "Your order" : "Automatic order",
+        }),
+      ),
     );
-    const release = document.querySelector('[data-sort="release"]');
+    const release = document.querySelector('#group-action option[value="release"]');
     if (release) release.hidden = !data.tab.managed;
   }
 
@@ -159,7 +170,8 @@
     const meta = [];
     if (c.kind) meta.push(el("span", { class: "badge", title: "Shown here because the televisions put " + c.kind + " channels in Entertainment; they also appear in the " + c.kind + " tab, in this order.", text: c.kind }));
     if (c.hidden) meta.push(el("span", { class: "badge pending", text: "Hidden" }));
-    if (c.originalName) meta.push(el("span", { class: "job-meta", text: "was " + c.originalName }));
+    const plain = (x) => (x || "").toLowerCase().replace(/[^a-z0-9+]/g, "");
+    if (c.originalName && plain(c.originalName) !== plain(c.name)) meta.push(el("span", { class: "job-meta", text: "was " + c.originalName }));
     if (c.edited) meta.push(el("span", { class: "badge edited", text: "Edited" }));
     if (c.twins && c.twins.length) {
       const boxes = [c.by].concat(c.twins.map((t) => t.by)).map((b) => b || "an earlier report");
@@ -184,17 +196,9 @@
     if (editor) {
       const b = (label, title, fn, disabled) => el("button", { type: "button", class: "mv", title, "aria-label": title + ": " + c.name, onclick: fn, disabled }, label);
       li.append(el("span", { class: "moves" },
-        b("⤒", "To top", () => moveTo(c.id, 0), i === 0),
         b("▲", "Up one", () => moveTo(c.id, i - 1), i === 0),
         b("▼", "Down one", () => moveTo(c.id, i + 1), i === n - 1),
-        b("⤓", "To bottom", () => moveTo(c.id, n), i === n - 1),
-        b("#", "Move to place", () => {
-          const v = prompt("Move " + c.name + " to place (1 to " + n + "):", String(i + 1));
-          if (v === null) return;
-          const p = parseInt(v, 10);
-          if (!(p >= 1 && p <= n)) { toast("Enter a place from 1 to " + n + ".", true); return; }
-          moveTo(c.id, p - 1);
-        }),
+        b("⋯", "More", () => toggleEdit(c.id), false),
       ));
       li.addEventListener("dragstart", (e) => { dragId = c.id; li.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", c.id); });
       li.addEventListener("dragend", () => { li.classList.remove("dragging"); document.querySelectorAll(".drop-before,.drop-after").forEach((x) => x.classList.remove("drop-before", "drop-after")); });
@@ -226,7 +230,7 @@
     drawList();
   }
 
-  function editPanel(c) {
+  function editPanel(c, i, n) {
     const send = (fields) => call("ui/channel_edit", Object.assign(tabRef(), { channelId: c.id }, fields));
     const onEnterOrBlur = (input, fn) => {
       let last = input.value;
@@ -249,7 +253,19 @@
       ...BOOT.folders.map((f) => el("option", { value: "SPORT_EXTRA::" + f, text: "Sports Extra / " + f.replace(/::/g, " / ") })),
     );
     groupSel.onchange = () => { if (groupSel.value !== "__") send({ moveToGroup: groupSel.value }); };
+    const placeIn = el("input", { type: "number", min: "1", max: String(n), value: String(i + 1), "aria-label": "Place in this group", class: "num" });
+    onEnterOrBlur(placeIn, (v) => {
+      const p = parseInt(v, 10);
+      if (!(p >= 1 && p <= n)) { toast("Enter a place from 1 to " + n + ".", true); return; }
+      moveTo(c.id, p - 1);
+    });
     return el("div", { class: "edit-panel" },
+      el("div", { class: "edit-place" },
+        el("span", { class: "job-meta", text: "Place" }),
+        el("button", { type: "button", disabled: i === 0, onclick: () => moveTo(c.id, 0) }, "⤒ To top"),
+        el("button", { type: "button", disabled: i === n - 1, onclick: () => moveTo(c.id, n) }, "⤓ To bottom"),
+        el("label", {}, "Move to place ", placeIn),
+      ),
       el("label", {}, "Name ", nameIn),
       el("label", {}, "Dial # ", numIn),
       el("label", {}, "Country ", countryIn),
@@ -273,7 +289,7 @@
     data.channels.forEach((c, i) => {
       if (find && !c.name.toLowerCase().includes(find) && String(c.number || "") !== find) return;
       const li = row(c, i, n);
-      if (openId === c.id && editor) li.append(editPanel(c));
+      if (openId === c.id && editor) li.append(editPanel(c, i, n));
       rows.push(li);
     });
     if (!rows.length) rows.push(el("li", { class: "job-meta", text: n ? "No channel in this group matches." : "This group is empty." }));
@@ -288,13 +304,17 @@
   }
 
   if (editor) {
-    document.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
-      const sort = b.getAttribute("data-sort");
+    const action = $("group-action");
+    action.addEventListener("change", () => {
+      const sort = action.value;
+      const label = action.options[action.selectedIndex].text;
+      action.value = "";
+      if (!sort) return;
       const ask = sort === "release"
         ? "Hand this group back to each television's automatic order? Its dial numbers are cleared."
-        : "Re-order the whole group (" + b.textContent + ")? Dial numbers follow the new order.";
+        : "Re-order the whole group (" + label + ")? Dial numbers follow the new order.";
       if (confirm(ask)) call("ui/tab_sort", Object.assign(tabRef(), { sort }));
-    }));
+    });
     $("find").addEventListener("input", drawList);
   }
   draw();

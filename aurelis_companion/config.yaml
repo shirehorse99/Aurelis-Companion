@@ -1,6 +1,6 @@
 name: "Aurelis Companion"
 slug: aurelis_companion
-version: "0.1.22"
+version: "0.1.23"
 description: "A helper server for Aurelis TV boxes: shares AI answers and guide downloads across your household."
 arch:
   - amd64
