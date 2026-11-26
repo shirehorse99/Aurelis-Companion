@@ -132,10 +132,10 @@ video stream, but it does not refuse addresses inside your home. Pair only telev
 
 ## Unpairing
 
-On the add-on's page choose **Unpair**. A paired television can also ask to unpair. Unpairing **deletes everything the Companion held for the household**, including the
-guides and their addresses, the pictures, the shared answers, any AI jobs and the keys sealed inside them, the master's sealed settings and the
-secret, and then shows a new pairing code. It cannot
-be undone.
+On the add-on's page choose **Unpair**. A paired television can also ask to unpair. Unpairing **deletes everything the Companion held for the household**: the guides and their
+addresses, the pictures, the shared answers, any AI jobs and the keys sealed inside them, the master's sealed settings, the secret, the televisions' playback states and
+notifications, the camera names, any live-channel relays and their timeshift buffers, and the record of providers that refused it. It then shows a new pairing code.
+It cannot be undone. Your settings on the add-on's page (the master switches and the options) are yours, not the household's, and stay as they are.
 
 ## Running it on plain Docker
 

@@ -22,6 +22,7 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Extension;
+use crate::auth::Session;
 use crate::state::{AppState, WallClock};
 
 pub const MAX_NOTIFICATIONS_STORED: usize = 50;
@@ -406,6 +407,23 @@ impl HaManager {
         (entity_id, synced_to_ha)
     }
 
+    /// Unpairing: forgets what the household's televisions and Home Assistant told this Companion
+    /// (device states and their file, notifications, queued TV commands, the active camera names).
+    /// The operator's master switches are not the household's data and stay as they are.
+    pub async fn reset(&self) {
+        self.devices.lock().await.clear();
+        self.notifications.lock().await.clear();
+        self.commands.lock().await.clear();
+        self.cctv_active_cameras.lock().await.clear();
+        if let Some(dir) = &self.data_dir {
+            match std::fs::remove_file(dir.join("ha_devices.json")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("unpair: cannot delete ha_devices.json: {e}"),
+            }
+        }
+    }
+
     pub async fn get_all_states(&self) -> Vec<TvPlaybackState> {
         let devs = self.devices.lock().await;
         devs.values().cloned().collect()
@@ -501,54 +519,31 @@ pub fn slugify_device_id(raw: &str) -> String {
 }
 
 // ---- Axum Handlers ----------------------------------------------------------------------------
+//
+// The four television routes below sit behind `auth::require_household`, so they take the
+// [`Session`] it inserts and answer sealed, like every other authenticated route. (They once asked
+// for an `Extension<()>` nothing inserts, so every call was a 500 the television read as "offline".)
 
 pub async fn handle_report_tv_state(
     State(state): State<Arc<AppState>>,
-    Extension(_): Extension<()>,
+    Extension(session): Extension<Session>,
     body: axum::body::Bytes,
-) -> Result<Response, (StatusCode, &'static str)> {
-    if !state.card().paired {
-        return Err((StatusCode::FORBIDDEN, "companion is not paired"));
-    }
-
+) -> Response {
     let payload: TvPlaybackState = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(_) => return Err((StatusCode::BAD_REQUEST, "invalid TvPlaybackState JSON")),
+        Err(_) => return session.sealed_reason(StatusCode::BAD_REQUEST, "invalid TvPlaybackState JSON"),
     };
-
     let (entity_id, ha_synced) = state.ha.update_playback_state(payload).await;
-
-    let reply = serde_json::json!({
+    session.sealed_json(StatusCode::OK, &serde_json::json!({
         "ok": true,
         "entityId": entity_id,
         "haSynced": ha_synced,
-    });
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(reply.to_string().into())
-        .unwrap())
+    }))
 }
 
-pub async fn handle_get_tv_states(
-    State(state): State<Arc<AppState>>,
-    Extension(_): Extension<()>,
-) -> Result<Response, (StatusCode, &'static str)> {
-    if !state.card().paired {
-        return Err((StatusCode::FORBIDDEN, "companion is not paired"));
-    }
-
-    let states = state.ha.get_all_states().await;
-    let reply = serde_json::json!({
-        "devices": states,
-    });
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(reply.to_string().into())
-        .unwrap())
+pub async fn handle_get_tv_states(State(state): State<Arc<AppState>>, Extension(session): Extension<Session>) -> Response {
+    let devices = state.ha.get_all_states().await;
+    session.sealed_json(StatusCode::OK, &serde_json::json!({ "devices": devices }))
 }
 
 pub async fn handle_push_notification(
@@ -741,17 +736,12 @@ pub async fn handle_set_catchup_config(
 
 pub async fn handle_poll_notifications(
     State(state): State<Arc<AppState>>,
-    Extension(_): Extension<()>,
+    Extension(session): Extension<Session>,
     req: Request,
-) -> Result<Response, (StatusCode, &'static str)> {
-    if !state.card().paired {
-        return Err((StatusCode::FORBIDDEN, "companion is not paired"));
-    }
-
+) -> Response {
     let query = req.uri().query().unwrap_or("");
     let mut since_ms: i64 = 0;
     let mut device_id: Option<String> = None;
-
     for part in query.split('&') {
         if let Some((k, v)) = part.split_once('=') {
             if k == "since_ms" {
@@ -761,37 +751,13 @@ pub async fn handle_poll_notifications(
             }
         }
     }
-
-    let notifs = state.ha.poll_notifications(since_ms, device_id.as_deref()).await;
-    let reply = serde_json::json!({
-        "notifications": notifs,
-    });
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(reply.to_string().into())
-        .unwrap())
+    let notifications = state.ha.poll_notifications(since_ms, device_id.as_deref()).await;
+    session.sealed_json(StatusCode::OK, &serde_json::json!({ "notifications": notifications }))
 }
 
-pub async fn handle_get_active_notifications(
-    State(state): State<Arc<AppState>>,
-    Extension(_): Extension<()>,
-) -> Result<Response, (StatusCode, &'static str)> {
-    if !state.card().paired {
-        return Err((StatusCode::FORBIDDEN, "companion is not paired"));
-    }
-
+pub async fn handle_get_active_notifications(State(state): State<Arc<AppState>>, Extension(session): Extension<Session>) -> Response {
     let active = state.ha.get_active_notifications().await;
-    let reply = serde_json::json!({
-        "active": active,
-    });
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(reply.to_string().into())
-        .unwrap())
+    session.sealed_json(StatusCode::OK, &serde_json::json!({ "active": active }))
 }
 
 #[cfg(test)]

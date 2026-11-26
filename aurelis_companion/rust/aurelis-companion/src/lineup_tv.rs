@@ -527,11 +527,40 @@ pub fn render(view: &crate::state::PageView, store: &LineupStore, editor: bool, 
     h.push_str("</section></div><div id=\"toast\" class=\"toast\" role=\"status\" aria-live=\"polite\"></div></main>");
     h.push_str("<script>const BOOT=");
     // Inside <script>, a "</" in data would end the element early.
-    h.push_str(&boot.to_string().replace("</", "<\\/"));
+    h.push_str(&script_json(&boot));
     h.push_str(";</script><script>");
     h.push_str(include_str!("lineup_tv.js"));
     h.push_str("</script></body></html>");
     h
+}
+
+/// JSON that can sit inside a `<script>` element: no `<` (so no `</script>` or `<!--`), no `>` or
+/// `&`, and the two line separators escaped too. Channel names come from providers and televisions,
+/// so they are data, not markup, whatever they contain.
+pub fn script_json(value: &Value) -> String {
+    value
+        .to_string()
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(test)]
+mod script_json_tests {
+    use super::*;
+
+    #[test]
+    fn a_channel_name_cannot_end_the_script_element() {
+        let hostile = json!({ "name": "</script><script>alert(1)</script><!--\u{2028}x&y" });
+        let out = script_json(&hostile);
+        assert!(!out.contains('<') && !out.contains('>') && !out.contains('&'), "{out}");
+        assert!(!out.contains('\u{2028}'));
+        // It is still the same data once a script reads it back.
+        let back: Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(back, hostile);
+    }
 }
 
 pub fn page_query(raw: &str) -> PageQuery {

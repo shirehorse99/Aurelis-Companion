@@ -537,6 +537,9 @@ pub async fn unpair(state: &Arc<AppState>) -> Result<(), crate::auth::Refusal> {
             s.tuner.reset().await;
             let _ = s.lineup.clear();
             s.lock().devices.clear();
+            s.stream_relay.forget_all();
+            crate::timeshift::cleanup_stale_timeshift(&s.config.data_dir);
+            s.ha.reset().await;
             // What the stores' own reset does not reach: the registrations (they hold provider
             // logins) and a picture folder that was never opened because the store was off.
             if let Err(why) = s.guides.clear().await {

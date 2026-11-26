@@ -252,7 +252,7 @@ impl StageStore {
                 return;
             }
             Err(e) => {
-                let err = format!("upstream connection failed: {e}");
+                let err = format!("upstream connection failed: {}", crate::guide_store::describe_err(e));
                 self.mark_failed(&id, &err);
                 return;
             }

@@ -269,12 +269,12 @@ pub async fn probe_stream_url(client: &reqwest::Client, url: &str) -> Result<Str
         .header("Range", "bytes=0-131071")
         .header("Accept", "*/*");
 
-    let resp = req.send().await.map_err(|e| format!("HTTP probe request failed: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("HTTP probe request failed: {}", crate::guide_store::describe_err(e)))?;
     if !resp.status().is_success() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(format!("upstream HTTP status {}", resp.status()));
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("reading stream probe body failed: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("reading stream probe body failed: {}", crate::guide_store::describe_err(e)))?;
 
     // Check if body is HLS text
     if let Ok(text) = std::str::from_utf8(&bytes) {
@@ -295,6 +295,18 @@ pub async fn probe_stream_url(client: &reqwest::Client, url: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An IPTV address carries its login in the path (Xtream). A probe that cannot connect says why
+    /// in words that reach the logs and the status page, so reqwest's own message, which prints the
+    /// address, must never be the text that is kept.
+    #[tokio::test]
+    async fn a_failed_probe_never_repeats_the_login_in_its_address() {
+        let client = reqwest::Client::new();
+        let url = "http://127.0.0.1:9/live/household/Zq81-Login-Secret/100.ts";
+        let err = probe_stream_url(&client, url).await.unwrap_err();
+        assert!(err.starts_with("HTTP probe request failed"), "{err}");
+        assert!(!err.contains("Zq81-Login-Secret") && !err.contains("/live/"), "{err}");
+    }
 
     #[test]
     fn hls_playlist_probe_detects_hevc_and_aac() {

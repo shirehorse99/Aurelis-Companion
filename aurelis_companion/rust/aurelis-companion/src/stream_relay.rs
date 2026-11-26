@@ -376,6 +376,29 @@ impl StreamRelayManager {
         }
     }
 
+    /// Unpairing: every relay is closed (its timeshift buffer's folder with it), and the refused
+    /// providers' hosts are forgotten with the household's other data.
+    pub fn forget_all(&self) {
+        let drained: Vec<Arc<ActiveRelay>> = {
+            let mut write = self.relays.write().unwrap_or_else(|e| e.into_inner());
+            write.drain().map(|(_, relay)| relay).collect()
+        };
+        for relay in drained {
+            if let Some(ts) = &relay.timeshift {
+                ts.close();
+            }
+        }
+        self.cooldowns.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.refusals.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        if let Some(path) = &self.refusals_file {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("unpair: cannot delete {}: {e}", path.display()),
+            }
+        }
+    }
+
     pub fn get_relay(&self, key: &str) -> Option<Arc<ActiveRelay>> {
         let read = self.relays.read().unwrap_or_else(|e| e.into_inner());
         read.get(key).cloned()
@@ -458,7 +481,7 @@ async fn run_upstream_ingest(
         let failed = match req.send().await {
             Ok(r) if r.status().is_success() => Ok(r),
             Ok(r) => Err(format!("the provider answered HTTP {}", r.status())),
-            Err(e) => Err(format!("the provider could not be reached: {e}")),
+            Err(e) => Err(format!("the provider could not be reached: {}", crate::guide_store::describe_err(e))),
         };
         let resp = match failed {
             Ok(r) => r,
@@ -535,8 +558,9 @@ async fn run_upstream_ingest(
                             }
                         }
                         Some(Err(e)) => {
-                            eprintln!("stream relay {}: read error: {e}", relay.key);
-                            why_stopped = Some(format!("the provider's stream dropped: {e}"));
+                            let why = crate::guide_store::describe_err(e);
+                            eprintln!("stream relay {}: read error: {why}", relay.key);
+                            why_stopped = Some(format!("the provider's stream dropped: {why}"));
                             break;
                         }
                         None => {

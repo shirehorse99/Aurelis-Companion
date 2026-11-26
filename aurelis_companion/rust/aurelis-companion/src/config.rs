@@ -43,7 +43,8 @@ impl Config {
     /// Reads the real environment and `<data dir>/options.json` when it exists.
     pub fn load() -> Result<Config, String> {
         let env = |k: &str| std::env::var(k).ok();
-        let data_dir = env("AURELIS_DATA_DIR").unwrap_or_else(|| "/data".to_string());
+        // The same reading as `from_sources`, so the options file is looked for where the config says.
+        let data_dir = env("AURELIS_DATA_DIR").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "/data".to_string());
         let options_path = Path::new(&data_dir).join("options.json");
         let options = match std::fs::read_to_string(&options_path) {
             Ok(text) => Some(text),
@@ -98,78 +99,27 @@ impl Config {
         };
         // 0 means "automatic", the same as not set (the Home Assistant add-on ships `disk_budget_mb: 0`).
         let disk_budget_mb = disk_budget_mb.filter(|b| *b > 0);
-        let picture_store_enabled = match env_str("AURELIS_PICTURES") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_PICTURES '{v}' must be 'on' or 'off'")),
-            None => match opt("pictures") {
-                None => false,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'pictures' must be true, false, 'on' or 'off', found {other}")),
-            },
+        // One reader for every on/off switch: the environment wins, then the options file, then the default.
+        let switch = |env_name: &str, option: &str, default: bool| -> Result<bool, String> {
+            match env_str(env_name) {
+                Some(v) if v.eq_ignore_ascii_case("on") => Ok(true),
+                Some(v) if v.eq_ignore_ascii_case("off") => Ok(false),
+                Some(v) => Err(format!("{env_name} '{v}' must be 'on' or 'off'")),
+                None => match opt(option) {
+                    None => Ok(default),
+                    Some(Value::Bool(b)) => Ok(*b),
+                    Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => Ok(true),
+                    Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => Ok(false),
+                    Some(other) => Err(format!("options.json '{option}' must be true, false, 'on' or 'off', found {other}")),
+                },
+            }
         };
-        let ai_runner = match env_str("AURELIS_AI_RUNNER") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_AI_RUNNER '{v}' must be 'on' or 'off'")),
-            None => match opt("ai_runner") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'ai_runner' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let betfair_relay = match env_str("AURELIS_BETFAIR_RELAY") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_BETFAIR_RELAY '{v}' must be 'on' or 'off'")),
-            None => match opt("betfair_relay") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'betfair_relay' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let dvr_enabled = match env_str("AURELIS_DVR") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_DVR '{v}' must be 'on' or 'off'")),
-            None => match opt("dvr") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'dvr' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let stream_relay = match env_str("AURELIS_STREAM_RELAY") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_STREAM_RELAY '{v}' must be 'on' or 'off'")),
-            None => match opt("stream_relay") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'stream_relay' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let timeshift_enabled = match env_str("AURELIS_TIMESHIFT") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_TIMESHIFT '{v}' must be 'on' or 'off'")),
-            None => match opt("timeshift") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'timeshift' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
+        let picture_store_enabled = switch("AURELIS_PICTURES", "pictures", false)?;
+        let ai_runner = switch("AURELIS_AI_RUNNER", "ai_runner", true)?;
+        let betfair_relay = switch("AURELIS_BETFAIR_RELAY", "betfair_relay", true)?;
+        let dvr_enabled = switch("AURELIS_DVR", "dvr", true)?;
+        let stream_relay = switch("AURELIS_STREAM_RELAY", "stream_relay", true)?;
+        let timeshift_enabled = switch("AURELIS_TIMESHIFT", "timeshift", true)?;
         let timeshift_minutes = match env_str("AURELIS_TIMESHIFT_MINUTES") {
             Some(v) => v.parse::<u64>().map_err(|_| format!("AURELIS_TIMESHIFT_MINUTES '{v}' is not a number"))?,
             None => match opt_u64("timeshift_minutes")? {
@@ -177,54 +127,10 @@ impl Config {
                 _ => 60,
             },
         };
-        let transcode_enabled = match env_str("AURELIS_TRANSCODE") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_TRANSCODE '{v}' must be 'on' or 'off'")),
-            None => match opt("transcode") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'transcode' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let stage_enabled = match env_str("AURELIS_STAGE") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_STAGE '{v}' must be 'on' or 'off'")),
-            None => match opt("stage") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'stage' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let tuner_enabled = match env_str("AURELIS_TUNER") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_TUNER '{v}' must be 'on' or 'off'")),
-            None => match opt("tuner") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'tuner' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
-        let homeassistant_enabled = match env_str("AURELIS_HOMEASSISTANT") {
-            Some(v) if v.eq_ignore_ascii_case("on") => true,
-            Some(v) if v.eq_ignore_ascii_case("off") => false,
-            Some(v) => return Err(format!("AURELIS_HOMEASSISTANT '{v}' must be 'on' or 'off'")),
-            None => match opt("homeassistant") {
-                None => true,
-                Some(Value::Bool(b)) => *b,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("on") => true,
-                Some(Value::String(s)) if s.eq_ignore_ascii_case("off") => false,
-                Some(other) => return Err(format!("options.json 'homeassistant' must be true, false, 'on' or 'off', found {other}")),
-            },
-        };
+        let transcode_enabled = switch("AURELIS_TRANSCODE", "transcode", true)?;
+        let stage_enabled = switch("AURELIS_STAGE", "stage", true)?;
+        let tuner_enabled = switch("AURELIS_TUNER", "tuner", true)?;
+        let homeassistant_enabled = switch("AURELIS_HOMEASSISTANT", "homeassistant", true)?;
         let hass_url = env_str("HASS_URL").or_else(|| opt("hass_url").and_then(|v| v.as_str().map(String::from)))
             .or_else(|| if env_str("SUPERVISOR_TOKEN").is_some() { Some("http://supervisor/core/api".to_string()) } else { None });
         let hass_token = env_str("HASS_TOKEN").or_else(|| env_str("SUPERVISOR_TOKEN"))

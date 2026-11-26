@@ -650,6 +650,63 @@ mod pairing_flow {
         assert_eq!(r.tv_pair(&code, [5u8; 32]).await.0, StatusCode::OK);
     }
 
+    /// The television's Home Assistant bridge and notification overlay: every call must answer with
+    /// a sealed reply it can open. These handlers once asked for an `Extension<()>` the middleware
+    /// never inserts, so each call came back 500 and the television read it as unavailable, silently.
+    #[tokio::test]
+    async fn paired_television_reaches_the_home_assistant_and_overlay_routes() {
+        let r = paired().await;
+        let calls: [(&str, &str, Value); 4] = [
+            ("POST", "/v1/tv/state", json!({ "deviceId": "box-1", "deviceName": "Lounge", "state": "idle" })),
+            ("GET", "/v1/tv/states", json!({})),
+            ("GET", "/v1/notifications/poll?since_ms=0", json!({})),
+            ("GET", "/v1/notifications/active", json!({})),
+        ];
+        for (method, path, body) in calls {
+            let (s, b) = r.authed(&SECRET, method, path, &body).await;
+            assert_eq!(s, StatusCode::OK, "{method} {path}: {}", String::from_utf8_lossy(&b));
+            let plain = seal::open(&b, &SECRET).unwrap_or_else(|| panic!("{method} {path}: the reply is not sealed"));
+            let v: Value = serde_json::from_slice(&plain).unwrap();
+            assert!(v.is_object(), "{method} {path}: {v}");
+        }
+        let (_, b) = r.authed(&SECRET, "POST", "/v1/tv/state", &json!({ "deviceId": "box-1", "deviceName": "Lounge", "state": "idle" })).await;
+        let v: Value = serde_json::from_slice(&seal::open(&b, &SECRET).unwrap()).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["entityId"], "media_player.aurelis_box_1");
+    }
+
+    /// Unpair promises to delete everything the household gave this Companion. The television
+    /// states (and their file), the notifications, the camera names and the timeshift buffers were
+    /// kept past it, so a new household would be shown the old one's.
+    #[tokio::test]
+    async fn unpair_forgets_the_home_assistant_state_and_the_timeshift_buffers() {
+        let r = paired().await;
+        let (s, _) = r.authed(&SECRET, "POST", "/v1/tv/state", &json!({ "deviceId": "box-1", "deviceName": "Lounge", "state": "playing", "title": "Old programme" })).await;
+        assert_eq!(s, StatusCode::OK);
+        r.state.ha.push_notification(crate::homeassistant::PushNotificationRequest {
+            id: None,
+            title: "Doorbell".into(),
+            message: "Someone is at the door".into(),
+            image_url: None,
+            duration_sec: 0,
+            priority: "normal".into(),
+            target_device: None,
+        }).await.expect("a notification is kept");
+        let ha_file = r.dir.0.join("ha_devices.json");
+        assert!(ha_file.exists(), "the television state is kept on disk");
+        let timeshift = r.dir.0.join("timeshift").join("some-channel");
+        std::fs::create_dir_all(&timeshift).unwrap();
+        std::fs::write(timeshift.join("seg-1.ts"), b"video").unwrap();
+
+        let (s, b) = r.authed(&SECRET, "POST", "/v1/unpair", &json!({})).await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        assert!(!ha_file.exists(), "ha_devices.json is deleted");
+        assert!(!r.dir.0.join("timeshift").exists(), "the timeshift folder is deleted");
+        assert!(r.state.ha.get_all_states().await.is_empty());
+        assert!(r.state.ha.poll_notifications(0, None).await.is_empty());
+        assert!(r.state.ha.get_active_notifications().await.is_empty());
+    }
+
     impl Rig {
         fn code_or_none(&self) -> Option<String> {
             self.state.auth.snapshot().code

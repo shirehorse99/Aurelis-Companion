@@ -1,0 +1,10 @@
+/private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/deps/polyval-9c715df993fe5f26.d: /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/lib.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/soft64.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/mulx.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/autodetect.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/clmul.rs
+
+/private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/deps/libpolyval-9c715df993fe5f26.rmeta: /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/lib.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/soft64.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/mulx.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/autodetect.rs /Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/clmul.rs
+
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/lib.rs:
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend.rs:
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/soft64.rs:
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/mulx.rs:
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/autodetect.rs:
+/Users/markdowney/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polyval-0.6.2/src/backend/clmul.rs:

@@ -1,7 +1,8 @@
 name: "Aurelis Companion"
 slug: aurelis_companion
-version: "0.1.24"
+version: "0.1.25"
 description: "A helper server for Aurelis TV boxes: shares AI answers and guide downloads across your household."
+# {arch} is amd64 or aarch64. The image is published by CI under the repository owner.
 arch:
   - amd64
   - aarch64

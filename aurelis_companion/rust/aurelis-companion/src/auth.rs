@@ -332,6 +332,9 @@ impl Auth {
         tokio::spawn(async move { this.complete_finish(k, generation, sealed).await })
             .await
             .unwrap_or_else(|e| {
+                // The task died before it could clear `busy`; without this every later pairing and
+                // unpair would refuse until the Companion restarted.
+                self.lock().busy = false;
                 eprintln!("pairing task failed: {e}");
                 Err(Refusal::new(StatusCode::INTERNAL_SERVER_ERROR, format!("pairing failed: {e}")))
             })
@@ -393,6 +396,7 @@ impl Auth {
         tokio::spawn(async move { this.complete_unpair(household).await })
             .await
             .unwrap_or_else(|e| {
+                self.lock().busy = false;
                 eprintln!("unpair task failed: {e}");
                 Err(Refusal::new(StatusCode::INTERNAL_SERVER_ERROR, format!("unpair failed: {e}")))
             })

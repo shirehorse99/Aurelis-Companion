@@ -1,0 +1,2 @@
+cargo:rerun-if-changed=src/lib.rs
+cargo:rustc-env=XMLTV_PARSER_LOGIC=fbb5d52844c22a12d3e41e46bbc7901cf2e5eaf78f1cccb2b02ee4d5fb087b96

@@ -1,5 +1,6 @@
 //! Headless Household DVR: scheduled captures, metadata persistence, stream pump and range streaming.
 
+use crate::guide_store::describe_err;
 use crate::bundle_store::write_atomic;
 use crate::state::{AppState, WallClock};
 use axum::body::Body;
@@ -567,7 +568,7 @@ async fn capture_stream(state: Arc<AppState>, entry: RecordingEntry) {
                             }
                         }
                         Err(e) => {
-                            error = Some(format!("stream dropped: {e}"));
+                            error = Some(format!("stream dropped: {}", describe_err(e)));
                             break;
                         }
                     }
@@ -582,10 +583,10 @@ async fn capture_stream(state: Arc<AppState>, entry: RecordingEntry) {
             }
             Ok(r) => format!("stream HTTP {}", r.status()),
             Err(e) if written == 0 && drops == 0 => {
-                fatal = Some(format!("stream connection failed: {e}"));
+                fatal = Some(format!("stream connection failed: {}", describe_err(e)));
                 break;
             }
-            Err(e) => format!("stream connection failed: {e}"),
+            Err(e) => format!("stream connection failed: {}", describe_err(e)),
         };
         drops += 1;
         eprintln!("dvr {}: {attempt_error}; reconnecting (drop {drops})", entry.id);
