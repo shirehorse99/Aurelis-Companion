@@ -12,6 +12,7 @@ mod guide_parse;
 mod guide_store;
 mod host;
 mod household;
+pub mod household_groups;
 mod mdns;
 mod pairing_routes;
 mod picture_store;
@@ -897,6 +898,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/ui/tab_order", post(lineup_tv::post_order).layer(DefaultBodyLimit::max(1024 * 1024)))
         .route("/ui/tab_sort", post(lineup_tv::post_sort))
         .route("/ui/country_order", post(lineup_tv::post_country_order))
+        .route("/ui/groups", post(lineup_tv::post_groups))
         .route("/ui/channel_edit", post(lineup_tv::post_edit).layer(DefaultBodyLimit::max(64 * 1024)))
         .route("/ui/assign_numbers", post(ui_assign_numbers))
         .route(

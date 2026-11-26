@@ -100,6 +100,29 @@
     );
   }
 
+  const household = () => data.household || { categories: [], folders: [] };
+  const isHouseholdKey = (k) => /^HC_\d+$/.test(k || "");
+  const householdFolders = (key) => household().folders.filter((f) => f.category === key).map((f) => f.path);
+  const folderLabel = (path) => path.replace(/::/g, " / ");
+  const leaf = (path) => path.split("::").pop();
+  function categoryLabel(key) {
+    const c = household().categories.find((x) => x.key === key);
+    if (c) return c.name;
+    const g = BOOT.groups.find((x) => x.key === key);
+    if (g) return g.label;
+    return key === "SPORT_EXTRA" ? "Sports Extra" : key;
+  }
+  function groupsCall(action, fields) {
+    return call("ui/groups", Object.assign(tabRef(), { action }, fields));
+  }
+  function askName(question, current) {
+    const v = prompt(question, current || "");
+    return v === null ? null : v.trim();
+  }
+
+  // The side list: every category as the televisions list it, its folders under it. Built-in
+  // categories carry a padlock; the household's own can be renamed and deleted, and any
+  // category can hold folders.
   function drawPickers() {
     const countries = [...new Set(data.tabs.map((t) => t.country))];
     drawCountryOrder(countries.filter((c) => c !== "UNKNOWN"));
@@ -109,42 +132,125 @@
       const first = data.tabs.find((t) => t.country === sel.value && t.group === (data.tab && data.tab.group)) || data.tabs.find((t) => t.country === sel.value);
       if (first) reload(first);
     };
-    const here = data.tabs.filter((t) => data.tab && t.country === data.tab.country);
-    const isActive = (t) => data.tab && t.group === data.tab.group && (t.folder || "") === (data.tab.folder || "");
-    const label = (t) => t.folder ? t.folder.replace(/::/g, " / ") : t.label;
-    // The groups as the television lists them; Sports Extra's folders sit under it.
+    const country = (data.tab && data.tab.country) || countries[0] || "GB";
+    const here = data.tabs.filter((t) => t.country === country);
+    const isActive = (key, folder) => data.tab && data.tab.group === key && (data.tab.folder || "") === (folder || "");
+    const open = (key, folder) => reload(folder ? { country, group: key, folder } : { country, group: key });
+    const keys = [...new Set(here.map((t) => t.group))];
+    for (const c of household().categories) if (!keys.includes(c.key)) keys.push(c.key);
+
     const items = [];
     const options = [];
-    let extraShown = false;
-    for (const t of here) {
-      const count = t.count - t.hidden;
-      if (t.group === "SPORT_EXTRA") {
-        if (!extraShown) {
-          extraShown = true;
-          const extras = here.filter((x) => x.group === "SPORT_EXTRA");
-          const total = extras.reduce((n, x) => n + x.count - x.hidden, 0);
-          items.push(el("div", { class: "group-heading" }, "Sports Extra", el("span", { class: "count", text: String(total) })));
+    const tool = (label, title, fn) => el("button", { type: "button", class: "mv small tool", title, "aria-label": title, onclick: (e) => { e.stopPropagation(); fn(); } }, label);
+    for (const key of keys) {
+      const tabs = here.filter((t) => t.group === key);
+      const root = tabs.find((t) => !t.folder);
+      const label = categoryLabel(key);
+      const mine = isHouseholdKey(key);
+      const listed = householdFolders(key);
+      const folders = [...new Set(tabs.filter((t) => t.folder).map((t) => t.folder).concat(listed))]
+        .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+      const count = (t) => (t ? t.count - t.hidden : 0);
+      const total = tabs.reduce((n, t) => n + count(t), 0);
+      const tools = [];
+      if (editor) {
+        if (mine) {
+          tools.push(tool("✎", "Rename " + label, () => {
+            const name = askName("New name for " + label + ":", label);
+            if (name) groupsCall("renameCategory", { category: key, name });
+          }));
+          tools.push(tool("✕", "Delete " + label, () => {
+            const ask = total
+              ? "Delete " + label + "? Its " + total + " channel(s) go back to the groups Aurelis puts them in, without dial numbers."
+              : "Delete " + label + "?";
+            if (confirm(ask)) groupsCall("deleteCategory", { category: key });
+          }));
+        } else {
+          tools.push(el("span", { class: "lock", title: label + " is built in: it cannot be renamed or deleted. Its folders can be.", "aria-label": "Built in" }, "🔒"));
         }
-        items.push(el("button", { type: "button", class: "group-item sub" + (isActive(t) ? " active" : ""), "aria-current": isActive(t) ? "true" : false, onclick: () => reload(t) },
-          el("span", { text: t.folder ? label(t) : "No folder" }), el("span", { class: "count", text: String(count) })));
-        options.push(el("option", { value: String(here.indexOf(t)), selected: isActive(t), text: "Sports Extra / " + (t.folder ? label(t) : "No folder") + " (" + count + ")" }));
-        continue;
+        if (key !== "HIDDEN") {
+          tools.push(tool("+", "Add a folder to " + label, () => {
+            const name = askName("Name of the new folder in " + label + ":");
+            if (name) groupsCall("addFolder", { category: key, name });
+          }));
+        }
       }
-      items.push(el("button", { type: "button", class: "group-item" + (isActive(t) ? " active" : ""), "aria-current": isActive(t) ? "true" : false, onclick: () => reload(t) },
-        el("span", { text: t.label }), el("span", { class: "count", text: String(count) })));
-      options.push(el("option", { value: String(here.indexOf(t)), selected: isActive(t), text: t.label + " (" + count + ")" }));
+      // With folders, the category's own row opens the channels in no folder, so it counts those.
+      const own = folders.length ? count(root) : total;
+      const head = el("div", { class: "group-row" + (isActive(key, null) ? " active" : "") },
+        el("button", { type: "button", class: "group-item" + (isActive(key, null) ? " active" : "") + (folders.length ? " parent" : ""), "aria-current": isActive(key, null) ? "true" : false, onclick: () => open(key, null),
+          title: folders.length ? total + " in all; " + own + " in no folder" : null },
+          el("span", { text: label }), el("span", { class: "count", text: folders.length ? own + " of " + total : String(total) })),
+        ...tools);
+      items.push(head);
+      options.push(el("option", { value: JSON.stringify([key, ""]), selected: isActive(key, null), text: label + " (" + total + ")" }));
+      for (const folder of folders) {
+        const t = tabs.find((x) => x.folder === folder);
+        const depth = folder.split("::").length;
+        const editable = editor && (key === "SPORT_EXTRA" || listed.includes(folder)) && key !== "OTHERS";
+        const ftools = [];
+        if (editable) {
+          ftools.push(tool("✎", "Rename the folder " + leaf(folder), () => {
+            const name = askName("New name for the folder " + leaf(folder) + ":", leaf(folder));
+            if (name) groupsCall("renameFolder", { category: key, path: folder, name });
+          }));
+          ftools.push(tool("✕", "Delete the folder " + leaf(folder), () => {
+            const n = folders.filter((f) => f === folder || f.startsWith(folder + "::"))
+              .reduce((sum, f) => sum + count(tabs.find((x) => x.folder === f)), 0);
+            if (confirm("Delete the folder " + folderLabel(folder) + " and any folders inside it? " + n + " channel(s) move up a level.")) {
+              groupsCall("deleteFolder", { category: key, path: folder });
+            }
+          }));
+          if (depth < 3) ftools.push(tool("+", "Add a folder inside " + leaf(folder), () => {
+            const name = askName("Name of the new folder inside " + leaf(folder) + ":");
+            if (name) groupsCall("addFolder", { category: key, path: folder, name });
+          }));
+        }
+        items.push(el("div", { class: "group-row sub depth-" + depth + (isActive(key, folder) ? " active" : "") },
+          el("button", { type: "button", class: "group-item sub" + (isActive(key, folder) ? " active" : ""), "aria-current": isActive(key, folder) ? "true" : false, onclick: () => open(key, folder) },
+            el("span", { text: leaf(folder) }), el("span", { class: "count", text: String(count(t)) })),
+          ...ftools));
+        options.push(el("option", { value: JSON.stringify([key, folder]), selected: isActive(key, folder), text: label + " / " + folderLabel(folder) + " (" + count(t) + ")" }));
+      }
+    }
+    if (editor) {
+      items.push(el("button", { type: "button", class: "group-add", onclick: () => {
+        const name = askName("Name of the new category (a guide tab on every television):");
+        if (name) groupsCall("addCategory", { name });
+      } }, "+ New category"));
     }
     $("groups").replaceChildren(...items);
     const gsel = $("group-select");
     gsel.replaceChildren(...options);
-    gsel.onchange = () => { const t = here[parseInt(gsel.value, 10)]; if (t) reload(t); };
+    gsel.onchange = () => { const [key, folder] = JSON.parse(gsel.value); open(key, folder); };
+  }
+
+  // Every category and folder a channel can be moved to, from the live list.
+  function moveOptions() {
+    const out = [];
+    const keys = BOOT.groups.map((g) => g.key).filter((k) => k !== "HIDDEN");
+    keys.splice(keys.indexOf("SPORT") + 1, 0, "SPORT_EXTRA");
+    for (const c of household().categories) keys.push(c.key);
+    keys.push("HIDDEN");
+    for (const key of keys) {
+      const label = categoryLabel(key);
+      if (key !== "SPORT_EXTRA") out.push(el("option", { value: key, text: label }));
+      let folders = householdFolders(key);
+      if (key === "SPORT_EXTRA") folders = [...new Set(BOOT.folders.concat(folders))];
+      for (const f of folders.sort()) {
+        out.push(el("option", { value: key + "::" + f, text: label + " / " + folderLabel(f) }));
+      }
+    }
+    return out;
   }
 
   function drawStatus() {
     const s = $("tab-status");
     if (!data.tab) { s.textContent = "No channels have been reported by a television yet."; return; }
     const shown = data.tab.count - data.tab.hidden;
-    const title = (data.tab.folder ? "Sports Extra / " + data.tab.folder.replace(/::/g, " / ") : data.tab.label)
+    const hasFolders = data.tabs.some((t) => t.country === data.tab.country && t.group === data.tab.group && t.folder)
+      || householdFolders(data.tab.group).length > 0;
+    const title = categoryLabel(data.tab.group) + (data.tab.folder ? " / " + folderLabel(data.tab.folder) : (hasFolders ? " (in no folder)" : ""))
       + " · " + (data.tab.country === "UNKNOWN" ? "No country" : data.tab.country);
     s.replaceChildren(
       el("h2", { text: title }),
@@ -249,8 +355,7 @@
     const groupSel = el("select", { "aria-label": "Move to group" },
       el("option", { value: "__", text: "Move to another group…" }),
       el("option", { value: "", text: "Automatic (as the provider files it)" }),
-      ...BOOT.groups.map((g) => el("option", { value: g.key, text: g.label })),
-      ...BOOT.folders.map((f) => el("option", { value: "SPORT_EXTRA::" + f, text: "Sports Extra / " + f.replace(/::/g, " / ") })),
+      ...moveOptions(),
     );
     groupSel.onchange = () => { if (groupSel.value !== "__") send({ moveToGroup: groupSel.value }); };
     const placeIn = el("input", { type: "number", min: "1", max: String(n), value: String(i + 1), "aria-label": "Place in this group", class: "num" });
@@ -292,7 +397,10 @@
       if (openId === c.id && editor) li.append(editPanel(c, i, n));
       rows.push(li);
     });
-    if (!rows.length) rows.push(el("li", { class: "job-meta", text: n ? "No channel in this group matches." : "This group is empty." }));
+    if (!rows.length) rows.push(el("li", { class: "job-meta empty-note", text: n ? "No channel in this group matches."
+      : (data.tab && (isHouseholdKey(data.tab.group) || data.tab.folder)
+        ? "Nothing here yet, so the televisions do not show it. Open a channel's ⋯ in another group and choose this one under Group."
+        : "This group is empty.") }));
     list.replaceChildren(...rows);
     list.classList.toggle("filtered", !!find);
   }

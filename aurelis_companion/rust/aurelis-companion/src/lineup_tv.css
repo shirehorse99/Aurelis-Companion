@@ -90,3 +90,18 @@ body.saving .tv-list { opacity: .7; pointer-events: none; }
     .tv-main, .tv-side { padding: .5rem; }
     body { padding: .6rem; }
 }
+
+/* Categories and folders: a row holds the tab and its tools (padlock, rename, delete, add folder). */
+.group-row { display: flex; align-items: center; gap: 1px; border-radius: .4rem; }
+.group-row .group-item { flex: 1; min-width: 0; }
+.group-row.sub { padding-left: .9rem; }
+.group-row.sub.depth-2 { padding-left: 1.8rem; }
+.group-row.sub.depth-3 { padding-left: 2.7rem; }
+.group-row .group-item.sub { padding-left: .55rem; }
+.group-row .tool { opacity: .35; min-width: 1.6rem; min-height: 1.6rem; }
+.group-row:hover .tool, .group-row .tool:focus-visible, .group-row.active .tool { opacity: 1; }
+.lock { font-size: .75rem; opacity: .45; padding: 0 .3rem; cursor: help; }
+.group-add { margin-top: .4rem; font: inherit; text-align: left; padding: .4rem .55rem; border: 1px dashed var(--border); border-radius: .4rem; background: none; color: var(--muted); cursor: pointer; }
+.group-add:hover { color: CanvasText; border-color: CanvasText; }
+.empty-note { padding: 1rem .8rem; }
+@media (hover: none) { .group-row .tool { opacity: 1; } }

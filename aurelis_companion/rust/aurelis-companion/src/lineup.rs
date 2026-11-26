@@ -174,6 +174,8 @@ pub struct ServedLineup {
     pub overrides: Vec<ChannelOverride>,
     /// The household's order of countries; each television puts its own home country first.
     pub country_order: Vec<String>,
+    /// The household's own categories and folders, so every television draws them as tabs.
+    pub groups: crate::household_groups::HouseholdGroups,
     pub etag: String,
 }
 
@@ -444,13 +446,15 @@ pub fn dial_country(country: Option<&str>) -> String {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DialGroup {
     country: String,
-    category: &'static str,
+    /// A built-in group's label ("Entertainment"), or a household category's key ("HC_3").
+    category: String,
     folder: Option<String>,
 }
 
 impl std::fmt::Display for DialGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} / {}", self.country, self.category)?;
+        let category = if crate::household_groups::is_household_key(&self.category) { "your category" } else { self.category.as_str() };
+        write!(f, "{} / {}", self.country, category)?;
         if let Some(folder) = &self.folder {
             write!(f, " / {}", folder.replace("::", " / "))?;
         }
@@ -471,16 +475,27 @@ pub fn tab_category(label: &'static str) -> &'static str {
     }
 }
 
+/// The household category a channel has been filed into, if any (`HC_3`).
+pub fn household_category(channel: &ChannelSummary) -> Option<&str> {
+    channel.original_genre.as_ref().and_then(|_| channel.genre.as_deref())
+        .and_then(|genre| genre.split(',').next()).map(str::trim)
+        .filter(|key| crate::household_groups::is_household_key(key))
+}
+
 pub fn dial_group(channel: &ChannelSummary) -> DialGroup {
+    let folder = channel.sports_extra_group.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned);
+    if let Some(key) = household_category(channel) {
+        return DialGroup { country: dial_country(channel.country_code.as_deref()), category: key.to_owned(), folder };
+    }
     let category = tab_category(resolve_aurelis_category(channel));
     DialGroup {
         country: dial_country(channel.country_code.as_deref()),
-        category,
+        category: category.to_owned(),
         folder: match category {
-            "Sports Extra" => channel.sports_extra_group.clone(),
-            "Others" => channel.original_genre.as_ref().or(channel.genre.as_ref())
-                .map(|genre| genre.trim().to_owned()).filter(|genre| !genre.is_empty()),
-            _ => None,
+            // A folder the household made wins over the provider's genre.
+            "Others" => folder.or_else(|| channel.original_genre.as_ref().or(channel.genre.as_ref())
+                .map(|genre| genre.trim().to_owned()).filter(|genre| !genre.is_empty())),
+            _ => folder,
         },
     }
 }
@@ -495,6 +510,9 @@ fn effective_channel(ch: &ChannelSummary, row: Option<&ChannelOverride>) -> Chan
         if let Some(cat) = &ov.category {
             effective.original_genre = Some(ch.genre.clone().unwrap_or_default());
             effective.genre = Some(cat.clone());
+            // Moved to another category: only a folder the household chose goes with it, never
+            // the Sports Extra bank a television reported for where it was.
+            effective.sports_extra_group = None;
         }
         if let Some(cc) = &ov.country_code {
             effective.country_code = Some(cc.clone());
@@ -520,15 +538,20 @@ fn channel_dial(channel: Option<&ChannelSummary>, row: Option<&ChannelOverride>)
         let effective = effective_channel(channel, row);
         return (dial_group(&effective), effective.channel_number);
     }
-    let category = row.and_then(|row| row.category.as_deref()).and_then(|csv| csv.split(',').next())
-        .and_then(aurelis_group_key)
-        .and_then(|key| AURELIS_GROUPS.iter().find(|&&(group, _)| group == key).map(|&(_, label)| label))
-        .unwrap_or("Others");
-    let category = tab_category(category);
-    let folder = if category == "Sports Extra" { row.and_then(|row| row.sports_extra_group.clone()) } else { None };
+    let first = row.and_then(|row| row.category.as_deref()).and_then(|csv| csv.split(',').next()).map(str::trim);
+    let category = match first {
+        Some(key) if crate::household_groups::is_household_key(key) => key.to_owned(),
+        _ => tab_category(first.and_then(aurelis_group_key)
+            .and_then(|key| AURELIS_GROUPS.iter().find(|&&(group, _)| group == key).map(|&(_, label)| label))
+            .unwrap_or("Others")).to_owned(),
+    };
+    let folder = row.and_then(|row| row.sports_extra_group.clone()).filter(|f| !f.trim().is_empty());
     let country = dial_country(row.and_then(|row| row.country_code.as_deref()));
     (DialGroup { country, category, folder }, row.and_then(|row| row.channel_number))
 }
+
+#[path = "lineup_groups.rs"]
+mod groups;
 
 pub struct LineupStore {
     dir: PathBuf,
@@ -539,6 +562,8 @@ pub struct LineupStore {
     served: Mutex<Option<(u64, Arc<ServedLineup>)>>,
     /// The household's order of countries (see [`ServedLineup::country_order`]).
     country_order: Mutex<Vec<String>>,
+    /// The household's own categories and folders (see [`crate::household_groups`]).
+    groups: Mutex<crate::household_groups::HouseholdGroups>,
     wall: WallClock,
 }
 
@@ -555,11 +580,16 @@ pub struct TabRef {
 
 impl TabRef {
     fn dial_group(&self) -> Option<DialGroup> {
-        let key = aurelis_group_key(&self.group)?;
-        let label = tab_category(AURELIS_GROUPS.iter().find(|&&(k, _)| k == key)?.1);
+        let group = self.group.trim();
+        let category = if crate::household_groups::is_household_key(group) {
+            group.to_owned()
+        } else {
+            let key = aurelis_group_key(group)?;
+            tab_category(AURELIS_GROUPS.iter().find(|&&(k, _)| k == key)?.1).to_owned()
+        };
         Some(DialGroup {
             country: dial_country(Some(&self.country)),
-            category: label,
+            category,
             folder: self.folder.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned),
         })
     }
@@ -569,8 +599,10 @@ impl TabRef {
 #[serde(rename_all = "camelCase")]
 pub struct TabSummary {
     pub country: String,
-    pub group: &'static str,
-    pub label: &'static str,
+    /// A built-in key ("NEWS") or a household one ("HC_3").
+    pub group: String,
+    /// What the tab is called; a household category's name is filled in by [`LineupStore::tabs`].
+    pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
     pub count: usize,
@@ -581,8 +613,12 @@ pub struct TabSummary {
 
 impl TabSummary {
     fn new(group: &DialGroup) -> Self {
-        let key = AURELIS_GROUPS.iter().find(|&&(_, l)| l == group.category).map_or("OTHERS", |&(k, _)| k);
-        Self { country: group.country.clone(), group: key, label: group.category, folder: group.folder.clone(), count: 0, hidden: 0, managed: false }
+        let key = if crate::household_groups::is_household_key(&group.category) {
+            group.category.clone()
+        } else {
+            AURELIS_GROUPS.iter().find(|&&(_, l)| l == group.category).map_or("OTHERS", |&(k, _)| k).to_owned()
+        };
+        Self { country: group.country.clone(), group: key, label: group.category.clone(), folder: group.folder.clone(), count: 0, hidden: 0, managed: false }
     }
 }
 
@@ -670,6 +706,7 @@ fn compute_served(
     channels: &HashMap<String, ChannelSummary>,
     overrides: &HashMap<String, ChannelOverride>,
     country_order: &[String],
+    household: &crate::household_groups::HouseholdGroups,
 ) -> ServedLineup {
     let mut rows = overrides.clone();
     let mut groups: HashMap<DialGroup, Vec<ChannelSummary>> = HashMap::new();
@@ -710,7 +747,15 @@ fn compute_served(
         let digest = hasher.finalize();
         etag = format!("v1-{}", digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
     }
-    ServedLineup { overrides, country_order: country_order.to_vec(), etag }
+    if !household.categories.is_empty() || !household.folders.is_empty() {
+        // A category made, renamed or deleted is a new lineup to the televisions.
+        let mut hasher = Sha256::new();
+        hasher.update(etag.as_bytes());
+        hasher.update(serde_json::to_vec(household).unwrap_or_default());
+        let digest = hasher.finalize();
+        etag = format!("v1-{}", digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    ServedLineup { overrides, country_order: country_order.to_vec(), groups: household.clone(), etag }
 }
 
 fn compute_overrides_etag(list: &[ChannelOverride]) -> String {
@@ -774,6 +819,7 @@ impl LineupStore {
                     .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
                     .unwrap_or_default(),
             ),
+            groups: Mutex::new(crate::household_groups::HouseholdGroups::load(&dir_for_order)),
             wall,
         }
     }
@@ -794,7 +840,8 @@ impl LineupStore {
             let channels = self.channels.lock().unwrap();
             let overrides = self.overrides.lock().unwrap();
             let order = self.country_order.lock().unwrap().clone();
-            Arc::new(compute_served(&channels, &overrides, &order))
+            let groups = self.groups.lock().unwrap().clone();
+            Arc::new(compute_served(&channels, &overrides, &order, &groups))
         };
         *self.served.lock().unwrap() = Some((generation, served.clone()));
         served
@@ -879,6 +926,8 @@ impl LineupStore {
         }
 
         let now = (self.wall)();
+        // Taken before the maps' locks: the groups' own lock is never held while waiting on them.
+        let household = self.household_groups();
         let channels = self.channels.lock().unwrap();
         let mut lock = self.overrides.lock().unwrap();
 
@@ -891,6 +940,12 @@ impl LineupStore {
             let t = c.trim().to_string();
             if t.is_empty() { None } else { Some(t) }
         });
+
+        if let Some(first) = norm_category.as_deref().and_then(|c| c.split(',').next()).map(str::trim) {
+            if crate::household_groups::is_household_key(first) && household.category(first).is_none() {
+                return Err("That category has been deleted. Choose another.".into());
+            }
+        }
 
         let norm_name = req.display_name.as_deref().and_then(|n| {
             let t = n.trim().to_string();
@@ -946,7 +1001,14 @@ impl LineupStore {
         }
         if let Some(folder) = req.sports_extra_group.as_deref() {
             let folder = folder.trim();
-            if !folder.is_empty() {
+            // A folder the household made, in the category the channel is going to (or is in).
+            let target = existing.category.as_deref().and_then(|c| c.split(',').next()).map(str::trim)
+                .map(|key| if crate::household_groups::is_household_key(key) { key.to_owned() } else { aurelis_group_key(key).unwrap_or(key).to_owned() });
+            let household_folder = !folder.is_empty() && target.as_deref()
+                .is_some_and(|key| household.folders_of(key).iter().any(|f| f == folder));
+            if household_folder {
+                // The category stays as it is.
+            } else if !folder.is_empty() {
                 let known = channels.values().filter_map(|ch| ch.sports_extra_group.as_deref())
                     .any(|bank| matches_sports_folder(bank, folder))
                     || lock.values().filter_map(|row| row.sports_extra_group.as_deref())
@@ -1204,7 +1266,11 @@ impl LineupStore {
                     country.category != "Sports Extra" || !country.folder.as_deref().is_some_and(|bank| matches_sports_folder(bank, folder))
                 } else {
                     let key = group.strip_prefix("AURELIS::").unwrap_or(group);
-                    aurelis_group_key(key) != aurelis_group_key(country.category)
+                    if crate::household_groups::is_household_key(key) {
+                        key != country.category
+                    } else {
+                        aurelis_group_key(key) != aurelis_group_key(&country.category)
+                    }
                 }
             }) {
                 continue;
@@ -1328,13 +1394,23 @@ impl LineupStore {
                 entry.managed = true;
             }
         }
-        let order = |label: &str| AURELIS_GROUPS.iter().position(|&(_, l)| l == label).unwrap_or(usize::MAX);
+        // Built-ins first in their own order, then the household's in the order it set.
+        let groups = self.groups.lock().unwrap().clone();
+        let order = |label: &str| AURELIS_GROUPS.iter().position(|&(_, l)| l == label)
+            .or_else(|| groups.categories.iter().position(|c| c.key == label).map(|i| AURELIS_GROUPS.len() + i))
+            .unwrap_or(usize::MAX);
+        for tab in tabs.values_mut() {
+            if let Some(category) = groups.category(&tab.group) {
+                tab.label = category.name.clone();
+            }
+        }
         let countries = self.country_order.lock().unwrap().clone();
         let country_rank = |c: &str| countries.iter().position(|x| x == c).unwrap_or(usize::MAX);
         let mut list: Vec<TabSummary> = tabs.into_values().collect();
         list.sort_by(|a, b| country_rank(&a.country).cmp(&country_rank(&b.country))
             .then_with(|| a.country.cmp(&b.country))
-            .then_with(|| order(a.label).cmp(&order(b.label)))
+            .then_with(|| order(if crate::household_groups::is_household_key(&a.group) { &a.group } else { &a.label })
+                .cmp(&order(if crate::household_groups::is_household_key(&b.group) { &b.group } else { &b.label })))
             .then_with(|| a.folder.cmp(&b.folder)));
         list
     }
@@ -1386,8 +1462,13 @@ impl LineupStore {
         let edited: HashSet<String> = listed.iter().filter(|ch| {
             is_edited(&ch.id) || twins.get(&ch.id).is_some_and(|t| t.iter().any(|tw| is_edited(&tw.id)))
         }).map(|ch| ch.id.clone()).collect();
+        let mut summary = TabSummary { count: listed.len(), hidden: listed.iter().filter(|ch| ch.hidden == Some(true)).count(), managed, ..TabSummary::new(&group) };
+        // The groups lock is only ever taken last, so holding the maps here cannot deadlock.
+        if let Some(category) = self.groups.lock().unwrap().category(&summary.group) {
+            summary.label = category.name.clone();
+        }
         Some(TabView {
-            tab: TabSummary { count: listed.len(), hidden: listed.iter().filter(|ch| ch.hidden == Some(true)).count(), managed, ..TabSummary::new(&group) },
+            tab: summary,
             channels: listed,
             edited,
             twins,
@@ -1913,7 +1994,14 @@ pub async fn handle_get_overrides(
     if session.is_some() {
         for row in &mut overrides {
             if let Some(category) = &row.category {
-                let groups: Vec<_> = category.split(',').filter_map(aurelis_group_key).collect();
+                let groups: Vec<String> = category.split(',').filter_map(|key| {
+                    let key = key.trim();
+                    if crate::household_groups::is_household_key(key) {
+                        Some(key.to_owned())
+                    } else {
+                        aurelis_group_key(key).map(str::to_owned)
+                    }
+                }).collect();
                 row.category = (!groups.is_empty()).then(|| groups.join(","));
             }
         }
@@ -1925,6 +2013,8 @@ pub async fn handle_get_overrides(
         serde_json::json!({
             "overrides": overrides,
             "countryOrder": served.country_order,
+            "categories": served.groups.categories,
+            "folders": served.groups.folders,
             "updatedAtMs": updated_at_ms,
             "etag": etag,
         }),

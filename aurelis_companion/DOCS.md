@@ -39,6 +39,25 @@ television boxes share work. It does six things:
 It never fetches video streams, and nothing is built into it: no key, login or address. Everything
 it knows, a paired television told it.
 
+## The Channels page
+
+Open the Companion from Home Assistant's side panel and choose **Channels** to arrange the guide
+for every television at once. The list on the left is the guide's groups, country by country; the
+group itself is shown in the order the televisions draw it. Every change saves at once.
+
+* **Your own categories.** **+ New category** adds a guide tab of its own, shown after the built-in
+  ones on every television once it has a channel in it. Rename it with ✎ and delete it with ✕;
+  deleting it sends its channels back to the groups Aurelis puts them in, without dial numbers.
+* **Folders.** **+** beside any category adds a folder inside it (up to three deep), shown on the
+  televisions as a tab nested under the category. Sports Extra's folders, including the ones the
+  televisions make, can be renamed and deleted too; a deleted folder's channels move up a level.
+* **Built-in categories** (Entertainment, News, Sport and the rest) carry a padlock: they cannot be
+  renamed or deleted, because Aurelis files new channels into them by itself.
+* To move a channel, open its ⋯ and choose the category or folder under **Group**.
+
+A television on an older Aurelis build ignores categories and folders it does not know, and shows
+those channels where it did before.
+
 ## What it holds, and your backups
 
 Once paired, the Companion's data folder (`/data` in the add-on) holds things worth protecting:

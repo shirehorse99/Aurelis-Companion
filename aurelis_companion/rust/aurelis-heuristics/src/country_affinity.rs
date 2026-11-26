@@ -80,6 +80,16 @@ static FIVE_USA_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// every country signal on the row reads GB and Irish viewers find their own television in the
 /// British section. Bounded by non-alphanumerics rather than `\b` so the accented `RTÉ`
 /// spelling matches too.
+/// Sky channels that exist only in the UK (and Ireland, which carries the UK feed). A provider
+/// that files one as "CA: Sky Sci-Fi" is mislabelling a British channel, and the label kept it
+/// apart from its British copy: the guide showed Sky Sci-Fi twice (owner, 26 Nov 2026). Checked
+/// before a name's own country prefix, unlike every other broadcaster list, so it is kept to
+/// brands no other country has: Sky Crime, Sky Atlantic and Sky Cinema exist in Germany and
+/// Italy too, and are left to the prefix.
+static UK_ONLY_SKY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[^a-z0-9])sky\s*(?:witness|max|sci[\s\-_./]*fi|scifi|showcase|mix|arts|history)(?:[^a-z0-9]|$)").unwrap()
+});
+
 static IRISH_BROADCASTER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(^|[^a-z0-9])(rte|rté|rte2|rté2|rtejr|rtéjr|tg4|virgin\s?media\s?(one|two|three|four|1|2|3|4))([^a-z0-9]|$)",
@@ -91,7 +101,7 @@ static IRISH_BROADCASTER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// Runs after `country_from_name_hint` so `Sky Sports NZ` keeps its feed tag.
 static UK_BROADCASTER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(?:^|[^a-z0-9])(?:bbc|itv|itvx|channel\s*4|ch4|channel\s*5|ch5|s4c|cymru|sky\s*sports|skysp|sky\s*news|sky\s*uk|sky\s*atlantic|sky\s*cinema|tnt\s*sport|bt\s*sport|freeview|freesat|talk\s*(?:tv|sport)?|racing[\s._\-]*uk|racing[\s._\-]*tv|racinguk|racingtv|at\s*the\s*races)(?:[^a-z0-9]|$)",
+        r"(?i)(?:^|[^a-z0-9])(?:bbc|itv|itvx|channel\s*4|ch4|channel\s*5|ch5|s4c|cymru|sky\s*sports|skysp|sky\s*news|sky\s*uk|sky\s*atlantic|sky\s*cinema|sky\s*(?:witness|max|sci[\s\-_./]*fi|scifi|showcase|mix|arts|history)|tnt\s*sport|bt\s*sport|freeview|freesat|talk\s*(?:tv|sport)?|racing[\s._\-]*uk|racing[\s._\-]*tv|racinguk|racingtv|at\s*the\s*races)(?:[^a-z0-9]|$)",
     )
     .unwrap()
 });
@@ -463,6 +473,11 @@ pub fn is_irish_broadcaster(name: &str) -> bool {
     IRISH_BROADCASTER_REGEX.is_match(name)
 }
 
+/// True when `name` is a Sky channel only the UK has — see [`UK_ONLY_SKY_REGEX`].
+pub fn is_uk_only_sky(name: &str) -> bool {
+    UK_ONLY_SKY_REGEX.is_match(name)
+}
+
 /// True when `name` is a UK broadcaster — see [`UK_BROADCASTER_REGEX`].
 pub fn is_uk_broadcaster(name: &str) -> bool {
     UK_BROADCASTER_REGEX.is_match(name)
@@ -481,6 +496,9 @@ pub fn detect_for_channel(channel_name: &str, genre: &str) -> Option<CountryInfo
     // and the channel is not.
     if is_irish_broadcaster(channel_name) {
         if let Some(c) = by_code().get("IE") { return Some(c.clone()); }
+    }
+    if is_uk_only_sky(channel_name) {
+        if let Some(c) = by_code().get("GB") { return Some(c.clone()); }
     }
     if let Some(c) = country_from_playlist_prefix_inner(channel_name, false) { return Some(c); }
     if let Some(c) = country_from_name_hint(channel_name) { return Some(c); }
@@ -699,5 +717,28 @@ mod sci_fi_is_not_finland {
         assert_eq!(detect_for_channel("Yle TV1 FI", "").map(|c| c.code), Some("FI"));
         assert_eq!(detect_for_channel("MTV3 (FI)", "").map(|c| c.code), Some("FI"));
     }
-}
 
+    /// One provider files Sky Sci-Fi under "CA| ENTERTAINMENT": the channel is British wherever it
+    /// is filed, or the arbiter keeps it as two channels (26 Nov 2026, .246).
+    #[test]
+    fn a_country_prefix_on_a_uk_only_sky_channel_is_a_mislabel() {
+        for name in ["CA: Sky Sci-Fi", "CA| SKY SCI-FI", "Sky Sci-Fi CA", "US: Sky Witness HD", "IE: Sky Arts"] {
+            assert_eq!(detect_for_channel(name, "CA| ENTERTAINMENT").map(|c| c.code), Some("GB".into()), "{name}");
+        }
+        // Brands other countries have keep their prefix.
+        assert_eq!(detect_for_channel("DE: Sky Crime", "UK: Entertainment").map(|c| c.code), Some("DE".into()));
+        assert_eq!(detect_for_channel("IT: Sky Atlantic", "UK: Entertainment").map(|c| c.code), Some("IT".into()));
+        assert_eq!(detect_for_channel("CA: CBC", "UK | General").map(|c| c.code), Some("CA".into()));
+    }
+
+    #[test]
+    fn uk_only_sky_channels_are_british_whatever_the_folder() {
+        for name in ["Sky Sci-Fi", "Sky Sci-Fi HD", "Sky Witness", "Sky Max", "Sky Showcase", "Sky Arts", "Sky History"] {
+            assert_eq!(detect_for_channel(name, "CA| ENTERTAINMENT").map(|c| c.code), Some("GB"), "{name}");
+        }
+        // Names that also exist abroad still follow the folder.
+        assert_eq!(detect_for_channel("Sky Crime", "DE| Unterhaltung").map(|c| c.code), Some("DE"));
+        // There is no German Sky Witness, so a tag in the name is a mislabel too.
+        assert_eq!(detect_for_channel("Sky Witness DE", "").map(|c| c.code), Some("GB"));
+    }
+}

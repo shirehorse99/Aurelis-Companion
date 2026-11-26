@@ -65,12 +65,13 @@ fn tab_json(store: &LineupStore, tab: &TabRef) -> Value {
     match store.tab_channels(tab) {
         Some(view) => json!({
             "ok": true,
+            "household": store.household_groups(),
             "countryOrder": store.country_order(),
             "tab": view.tab,
             "channels": view.channels.iter().map(|ch| channel_json(ch, &view)).collect::<Vec<_>>(),
             "tabs": tabs,
         }),
-        None => json!({ "ok": true, "countryOrder": store.country_order(), "tab": null, "channels": [], "tabs": tabs }),
+        None => json!({ "ok": true, "household": store.household_groups(), "countryOrder": store.country_order(), "tab": null, "channels": [], "tabs": tabs }),
     }
 }
 
@@ -96,6 +97,84 @@ pub async fn post_country_order(
     };
     match state.lineup.set_country_order(&req.order) {
         Ok(order) => saved(&state, &req.tab, format!("Country order saved: {}. Each television still puts its own home country first.", order.join(", "))),
+        Err(e) => refuse(e),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupsRequest {
+    #[serde(flatten)]
+    tab: TabRef,
+    action: String,
+    /// A category key: "HC_3", or a built-in one ("NEWS") for its folders.
+    #[serde(default)]
+    category: Option<String>,
+    /// The folder acted on, for a folder rename or delete; the parent, for a new folder.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    index: Option<usize>,
+}
+
+/// The household's own categories and folders: add, rename, move, delete. Built-in categories
+/// are refused for rename, move and delete; their folders are not.
+pub async fn post_groups(
+    State(state): State<Arc<AppState>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(resp) = guard(peer, &headers) { return resp; }
+    let req: GroupsRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => return refuse(format!("Unreadable request: {e}")),
+    };
+    let store = &state.lineup;
+    let name = req.name.as_deref().unwrap_or("");
+    let category = req.category.as_deref().map(str::trim).unwrap_or("");
+    let path = req.path.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    let mut tab = req.tab.clone();
+    let result: Result<String, String> = match req.action.as_str() {
+        "addCategory" => store.add_household_category(name).map(|c| {
+            tab = TabRef { country: tab.country.clone(), group: c.key.clone(), folder: None };
+            format!("Added {}. Move channels into it from a channel's ⋯ menu; every television shows it once it has a channel.", c.name)
+        }),
+        "renameCategory" => store.rename_household_category(category, name).map(|c| format!("Renamed to {}.", c.name)),
+        "moveCategory" => store.move_household_category(category, req.index.unwrap_or(0)).map(|()| "Category order saved.".to_owned()),
+        "deleteCategory" => store.delete_household_category(category).map(|change| {
+            if tab.group == category {
+                tab = TabRef { country: tab.country.clone(), group: "ENTERTAINMENT".into(), folder: None };
+            }
+            change.message
+        }),
+        "addFolder" => store.add_household_folder(category, path, name).map(|made| {
+            format!("Added the folder {}. Move channels into it from a channel's ⋯ menu.", made.replace("::", " / "))
+        }),
+        "renameFolder" => match path {
+            None => Err("Choose a folder.".into()),
+            Some(path) => store.rename_household_folder(category, path, name).map(|change| {
+                if tab.group == category && tab.folder.as_deref().is_some_and(|f| crate::household_groups::folder_contains(path, f)) {
+                    tab.folder = None;
+                }
+                change.message
+            }),
+        },
+        "deleteFolder" => match path {
+            None => Err("Choose a folder.".into()),
+            Some(path) => store.delete_household_folder(category, path).map(|change| {
+                if tab.group == category && tab.folder.as_deref().is_some_and(|f| crate::household_groups::folder_contains(path, f)) {
+                    tab.folder = None;
+                }
+                change.message
+            }),
+        },
+        other => Err(format!("Unknown action '{other}'.")),
+    };
+    match result {
+        Ok(message) => saved(&state, &tab, message),
         Err(e) => refuse(e),
     }
 }
@@ -267,12 +346,28 @@ pub async fn post_edit(
         } else if let Some(folder) = group.strip_prefix("SPORT_EXTRA::") {
             save.sports_extra_group = Some(folder.to_owned());
             message = format!("Moved {name} to Sports Extra / {}.", folder.replace("::", " / "));
-        } else if let Some(key) = lineup::aurelis_group_key(group) {
-            save.category = Some(key.to_owned());
-            save.sports_extra_group = Some(String::new());
-            message = format!("Moved {name} to {}.", lineup::group_label(key));
         } else {
-            return refuse("Choose a group from the list.");
+            // "NEWS", "HC_3", or either with a folder: "NEWS::Rolling", "HC_3::Cartoons::Classic".
+            let (key, folder) = group.split_once("::").map_or((group, ""), |(k, f)| (k, f));
+            let household = state.lineup.household_groups();
+            let key = if crate::household_groups::is_household_key(key) {
+                key.to_owned()
+            } else if let Some(key) = lineup::aurelis_group_key(key) {
+                key.to_owned()
+            } else {
+                return refuse("Choose a group from the list.");
+            };
+            let Some(label) = household.label(&key) else { return refuse("That category has been deleted. Choose another.") };
+            if !folder.is_empty() && !household.folders_of(&key).iter().any(|f| f == folder) {
+                return refuse("That folder has been deleted or renamed. Choose another.");
+            }
+            save.category = Some(key);
+            save.sports_extra_group = Some(folder.to_owned());
+            message = if folder.is_empty() {
+                format!("Moved {name} to {label}.")
+            } else {
+                format!("Moved {name} to {label} / {}.", folder.replace("::", " / "))
+            };
         }
     }
     if let Some(cc) = save.country_code.as_deref() {
@@ -494,7 +589,7 @@ mod tests {
         assert_eq!(&auto[..2], ["BBC One", "BBC One +1"], "{auto:?}");
         assert!(!store.tab_channels(&tab("ENTERTAINMENT")).unwrap().tab.managed);
         let tabs = store.tabs();
-        assert_eq!(tabs.iter().map(|t| (t.label, t.count)).collect::<Vec<_>>(), [("Entertainment", 4), ("News", 1)]);
+        assert_eq!(tabs.iter().map(|t| (t.label.as_str(), t.count)).collect::<Vec<_>>(), [("Entertainment", 4), ("News", 1)]);
 
         // One order for the whole tab: numbered from 101, and the televisions are sent exactly it.
         store.set_tab_order(&tab("ENTERTAINMENT"), &["alibi".into(), "bbc1".into()]).unwrap();
