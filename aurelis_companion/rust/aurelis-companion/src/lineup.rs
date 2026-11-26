@@ -451,6 +451,19 @@ pub struct DialGroup {
     folder: Option<String>,
 }
 
+/// The first dial number a group takes when no start is given. Sports Extra starts at 2000 in every
+/// country, so its channels sit apart from the main dial; the other groups keep their bases
+/// (101 for GB and IE, 1 elsewhere).
+fn default_dial_base(group: &DialGroup) -> i64 {
+    if group.category == "Sports Extra" {
+        return 2000;
+    }
+    match group.country.as_str() {
+        "GB" | "IE" => 101,
+        _ => 1,
+    }
+}
+
 impl std::fmt::Display for DialGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let category = if crate::household_groups::is_household_key(&self.category) { "your category" } else { self.category.as_str() };
@@ -1146,7 +1159,7 @@ impl LineupStore {
         }).collect();
         let mut slots: BTreeSet<_> = group.iter().filter_map(|(_, number, _)| *number)
             .filter(|number| !reserved.contains(number)).collect();
-        let mut next = slots.last().map_or(if matches!(country.country.as_str(), "GB" | "IE") { 101 } else { 1 }, |n| i64::from(*n) + 1);
+        let mut next = slots.last().map_or(default_dial_base(&country), |n| i64::from(*n) + 1);
         while slots.len() < group.len() {
             let number = i32::try_from(next).map_err(|_| format!("No more dial numbers in {country}."))?;
             next += 1;
@@ -1232,8 +1245,8 @@ impl LineupStore {
 
     /// Automatically assigns dial numbers independently for each country and Aurelis group.
     ///
-    /// Standard base numbers:
-    /// - UK (GB): 101+
+    /// Standard base numbers (see [`default_dial_base`]):
+    /// - UK (GB): 101+; Sports Extra from 2000 in every country
     /// - US: 1+
     /// - IE: 101+
     /// - Default: 1+
@@ -1311,10 +1324,7 @@ impl LineupStore {
                 }
             });
 
-            let base = req.start_number.unwrap_or(match country.country.as_str() {
-                "GB" | "IE" => 101,
-                _ => 1,
-            });
+            let base = req.start_number.map_or(default_dial_base(&country), i64::from);
             let used = reserved.entry(country.clone()).or_default();
             let mut next = i64::from(base);
             for (channel, number) in group {
@@ -1506,7 +1516,7 @@ impl LineupStore {
         let mut slots: BTreeSet<i32> = current.channels.iter()
             .filter(|ch| current.tab.managed || overrides.get(&ch.id).is_some_and(|row| row.channel_number.is_some()))
             .filter_map(|ch| ch.channel_number).filter(|n| !reserved.contains(n)).collect();
-        let mut next = slots.last().map_or(if matches!(group.country.as_str(), "GB" | "IE") { 101 } else { 1 }, |n| i64::from(*n) + 1);
+        let mut next = slots.last().map_or(default_dial_base(&group), |n| i64::from(*n) + 1);
         while slots.len() < order.len() {
             let number = i32::try_from(next).map_err(|_| format!("No more dial numbers in {group}."))?;
             next += 1;
@@ -2684,6 +2694,55 @@ mod tests {
         assert!(html.contains("ITV1") && html.contains("BBC One"));
         assert!(html.contains("name=\"row_edit__0\" value=\"1\""));
         assert!(html.contains("action=\"ui/save_channel_rows\"") && html.contains("name=\"save_all\""));
+    }
+
+    /// Sports Extra numbers from 2000 in every country when no start is given; the main UK dial still starts at 101.
+    #[test]
+    fn uk_sports_extra_numbers_start_at_2000_and_the_rest_of_the_uk_at_101() {
+        use serde_json::json;
+        let dir = temp_test_dir();
+        let store = LineupStore::new(dir.0.clone(), test_clock(1000));
+        store.report_channels(serde_json::from_value(json!([
+            {"id":"darts_1", "name":"Darts TV", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+            {"id":"darts_2", "name":"Darts Two", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+            {"id":"news_1", "name":"Sky News", "countryCode":"GB", "aurelisCategory":"NEWS"},
+            {"id":"us_sport", "name":"ESPN Extra", "countryCode":"US", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"}
+        ])).unwrap()).unwrap();
+        for country in ["GB", "US"] {
+            store.assign_channel_numbers(AssignNumbersRequest {
+                country_code: Some(country.into()), group: None, start_number: None, overwrite_existing: None, order: None,
+            }).unwrap();
+        }
+        let number = |id: &str| store.get_channels().into_iter().find(|c| c.id == id).and_then(|c| c.channel_number);
+        assert_eq!(number("darts_1"), Some(2000));
+        assert_eq!(number("darts_2"), Some(2001));
+        assert_eq!(number("us_sport"), Some(2000), "Sports Extra starts at 2000 in every country");
+        assert_eq!(number("news_1"), Some(101));
+        // An explicit start still wins.
+        store.assign_channel_numbers(AssignNumbersRequest {
+            country_code: Some("GB".into()), group: Some("SPORT_EXTRA".into()), start_number: Some(3000), overwrite_existing: Some(true), order: None,
+        }).unwrap();
+        assert_eq!(number("darts_1"), Some(3000));
+    }
+
+    /// A Sports Extra bank that only the televisions reported (no folder of the household's own).
+    /// Renaming it from the editor must move its channels and show the new name everywhere.
+    #[test]
+    fn renaming_a_television_made_sports_extra_bank_moves_its_channels() {
+        use serde_json::json;
+        let dir = temp_test_dir();
+        let store = LineupStore::new(dir.0.clone(), test_clock(1000));
+        store.report_channels(serde_json::from_value(json!([
+            {"id":"darts_1", "name":"Darts TV", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+            {"id":"darts_2", "name":"Darts Two", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"}
+        ])).unwrap()).unwrap();
+        store.rename_household_folder("SPORT_EXTRA", "Darts", "Darts & Snooker").unwrap();
+        let folder_of = |id: &str| store.get_channels().into_iter().find(|c| c.id == id).and_then(|c| c.sports_extra_group);
+        assert_eq!(folder_of("darts_1").as_deref(), Some("Darts & Snooker"));
+        assert_eq!(folder_of("darts_2").as_deref(), Some("Darts & Snooker"));
+        let folders = store.household_groups().folders_of("SPORT_EXTRA");
+        assert!(folders.iter().any(|f| f == "Darts & Snooker"), "{folders:?}");
+        assert!(!folders.iter().any(|f| f == "Darts"), "{folders:?}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
-/private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/deps/xmltv_parser-66f2d0a609ab2fc6.d: xmltv-parser/src/lib.rs
+/private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/deps/xmltv_parser-66f2d0a609ab2fc6.d: xmltv-parser/src/lib.rs
 
-/private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/deps/libxmltv_parser-66f2d0a609ab2fc6.rmeta: xmltv-parser/src/lib.rs
+/private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/deps/libxmltv_parser-66f2d0a609ab2fc6.rmeta: xmltv-parser/src/lib.rs
 
 xmltv-parser/src/lib.rs:
 

@@ -52,12 +52,12 @@ CFLAGS = None
 HOST_CFLAGS = None
 CFLAGS_x86_64_apple_darwin = None
 CFLAGS_x86_64-apple-darwin = None
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
-cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-gfp_p256.o) has no symbols
+cargo:warning=/Library/Developer/CommandLineTools/usr/bin/ranlib: file: /private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out/libring_core_0_17_14_.a(abdfa25550f18ac7-p256.o) has no symbols
 cargo:rustc-link-lib=static=ring_core_0_17_14_
 cargo:rerun-if-env-changed=CC_x86_64-apple-darwin
 CC_x86_64-apple-darwin = None
@@ -101,7 +101,7 @@ HOST_CFLAGS = None
 CFLAGS_x86_64_apple_darwin = None
 CFLAGS_x86_64-apple-darwin = None
 cargo:rustc-link-lib=static=ring_core_0_17_14__test
-cargo:rustc-link-search=native=/private/tmp/claude-501/addon-ZiCd/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out
+cargo:rustc-link-search=native=/private/tmp/claude-501/addon-rel-lIc9/r/aurelis_companion/rust/target/debug/build/ring-cf267bdf6f54d226/out
 cargo:rerun-if-changed=crypto/perlasm/x86_64-xlate.pl
 cargo:rerun-if-changed=crypto/perlasm/x86gas.pl
 cargo:rerun-if-changed=crypto/perlasm/x86nasm.pl
