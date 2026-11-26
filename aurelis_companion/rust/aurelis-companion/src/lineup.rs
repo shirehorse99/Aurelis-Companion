@@ -464,6 +464,26 @@ fn default_dial_base(group: &DialGroup) -> i64 {
     }
 }
 
+/// The run of dial numbers a group's numbers must be unique within. Sports Extra is one run per
+/// country across all its folders (owner, 26 Nov 2026: "gb-2000, au-2000"), so GB Darts and GB
+/// Snooker never share a number; every other group is its own run.
+fn dial_pool(group: &DialGroup) -> DialGroup {
+    if group.category == "Sports Extra" {
+        DialGroup { folder: None, ..group.clone() }
+    } else {
+        group.clone()
+    }
+}
+
+/// Folders of one pool sort together, no folder first, then A to Z as the editor lists them.
+fn folder_rank(group: &DialGroup) -> (bool, String) {
+    (group.folder.is_some(), group.folder.as_deref().unwrap_or_default().to_lowercase())
+}
+
+/// Marks that the one-time renumber of existing Sports Extra channels into per-country runs from
+/// 2000 has been done, so a later hand edit is never undone by a restart.
+const SPORTS_EXTRA_RUNS_FILE: &str = "lineup_sports_extra_runs.done";
+
 impl std::fmt::Display for DialGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let category = if crate::household_groups::is_household_key(&self.category) { "your category" } else { self.category.as_str() };
@@ -821,7 +841,7 @@ impl LineupStore {
             Mutex::new(map)
         };
 
-        Self {
+        let store = Self {
             dir,
             overrides,
             channels,
@@ -834,6 +854,30 @@ impl LineupStore {
             ),
             groups: Mutex::new(crate::household_groups::HouseholdGroups::load(&dir_for_order)),
             wall,
+        };
+        store.renumber_sports_extra_once();
+        store
+    }
+
+    /// Once per Companion: renumber the Sports Extra channels already in the lineup into one run per
+    /// country from 2000, keeping their current order (owner, 26 Nov 2026: "also change the current
+    /// lists"). Later Sports Extra channels get 2000-based numbers without this.
+    fn renumber_sports_extra_once(&self) {
+        let marker = self.dir.join(SPORTS_EXTRA_RUNS_FILE);
+        if marker.exists() {
+            return;
+        }
+        match self.assign_channel_numbers(AssignNumbersRequest {
+            country_code: None, group: Some("SPORT_EXTRA".into()), start_number: None,
+            overwrite_existing: Some(true), order: None,
+        }) {
+            Ok(count) => {
+                eprintln!("lineup: Sports Extra renumbered from 2000 in each country, {count} channels");
+                if let Err(err) = std::fs::write(&marker, b"done\n") {
+                    eprintln!("lineup: Sports Extra renumber done, but its marker could not be written ({err}); it will run again at the next start");
+                }
+            }
+            Err(err) => eprintln!("lineup: Sports Extra renumber from 2000 failed, numbers left as they were: {err}"),
         }
     }
 
@@ -1152,11 +1196,17 @@ impl LineupStore {
         let moved = group.remove(from);
         group.insert(position - 1, moved);
 
-        let reserved: HashSet<_> = overrides.iter().filter_map(|(id, row)| {
+        let pool = dial_pool(&country);
+        let mut reserved: HashSet<_> = overrides.iter().filter_map(|(id, row)| {
             if channels.contains_key(id) { return None; }
             let (group_country, number) = channel_dial(None, Some(row));
-            (group_country == country).then_some(number).flatten()
+            (dial_pool(&group_country) == pool).then_some(number).flatten()
         }).collect();
+        // The other folders of a Sports Extra run keep their numbers.
+        reserved.extend(channels.values().filter_map(|channel| {
+            let (group_country, number) = channel_dial(Some(channel), overrides.get(&channel.id));
+            (group_country != country && dial_pool(&group_country) == pool).then_some(number).flatten()
+        }));
         let mut slots: BTreeSet<_> = group.iter().filter_map(|(_, number, _)| *number)
             .filter(|number| !reserved.contains(number)).collect();
         let mut next = slots.last().map_or(default_dial_base(&country), |n| i64::from(*n) + 1);
@@ -1269,7 +1319,7 @@ impl LineupStore {
         let channels = self.channels.lock().unwrap();
         let mut overrides = self.overrides.lock().unwrap();
         let mut updated = overrides.clone();
-        let mut grouped: HashMap<DialGroup, Vec<(&ChannelSummary, Option<i32>)>> = HashMap::new();
+        let mut grouped: HashMap<DialGroup, Vec<(&ChannelSummary, Option<i32>, DialGroup)>> = HashMap::new();
         let mut reserved: HashMap<DialGroup, HashSet<i32>> = HashMap::new();
 
         for channel in channels.values() {
@@ -1286,21 +1336,27 @@ impl LineupStore {
                     }
                 }
             }) {
+                // Not renumbered, but a Sports Extra folder left out still holds its numbers in the
+                // country's run, so the folder being numbered goes round them.
+                if let Some(number) = number {
+                    reserved.entry(dial_pool(&country)).or_default().insert(number);
+                }
                 continue;
             }
+            let pool = dial_pool(&country);
             if !overwrite {
                 if let Some(number) = number {
-                    reserved.entry(country.clone()).or_default().insert(number);
+                    reserved.entry(pool.clone()).or_default().insert(number);
                 }
             }
-            grouped.entry(country).or_default().push((channel, number));
+            grouped.entry(pool).or_default().push((channel, number, country));
         }
 
         // An override can be entered by ID before any TV has reported that channel.
         for (_, row) in overrides.iter().filter(|(id, _)| !channels.contains_key(*id)) {
             let (country, number) = channel_dial(None, Some(row));
             if let Some(number) = number {
-                reserved.entry(country).or_default().insert(number);
+                reserved.entry(dial_pool(&country)).or_default().insert(number);
             }
         }
 
@@ -1309,11 +1365,11 @@ impl LineupStore {
             let effective_name = |channel: &ChannelSummary| {
                 overrides.get(&channel.id).and_then(|row| row.display_name.as_deref())
             };
-            group.sort_by(|(a, a_number), (b, b_number)| {
+            group.sort_by(|(a, a_number, a_group), (b, b_number, b_group)| {
                 let a_name = effective_name(a).unwrap_or(&a.name);
                 let b_name = effective_name(b).unwrap_or(&b.name);
                 let by_name = a_name.cmp(b_name).then_with(|| a.id.cmp(&b.id));
-                match order {
+                folder_rank(a_group).cmp(&folder_rank(b_group)).then_with(|| match order {
                     "name" => by_name,
                     // The provider's own numbers, as the television reported them.
                     "provider" => a.channel_number.is_none().cmp(&b.channel_number.is_none())
@@ -1321,13 +1377,13 @@ impl LineupStore {
                     // What the editor and the televisions show now, so a renumber keeps the order.
                     _ => a_number.is_none().cmp(&b_number.is_none())
                         .then_with(|| a_number.cmp(b_number)).then_with(|| by_name),
-                }
+                })
             });
 
             let base = req.start_number.map_or(default_dial_base(&country), i64::from);
             let used = reserved.entry(country.clone()).or_default();
             let mut next = i64::from(base);
-            for (channel, number) in group {
+            for (channel, number, _) in group {
                 if number.is_some() && !overwrite {
                     continue;
                 }
@@ -1508,11 +1564,19 @@ impl LineupStore {
         let now = (self.wall)();
         let channels = self.channels.lock().unwrap();
         let mut overrides = self.overrides.lock().unwrap();
-        let reserved: HashSet<i32> = overrides.iter().filter(|(id, _)| !channels.contains_key(*id))
+        let pool = dial_pool(&group);
+        let in_tab_or_twin: HashSet<&str> = in_tab.iter().copied()
+            .chain(current.twins.values().flatten().map(|ch| ch.id.as_str())).collect();
+        let mut reserved: HashSet<i32> = overrides.iter().filter(|(id, _)| !channels.contains_key(*id))
             .filter_map(|(_, row)| {
                 let (row_group, number) = channel_dial(None, Some(row));
-                (row_group == group).then_some(number).flatten()
+                (dial_pool(&row_group) == pool).then_some(number).flatten()
             }).collect();
+        // The other folders of a Sports Extra run keep their numbers.
+        reserved.extend(channels.values().filter(|ch| !in_tab_or_twin.contains(ch.id.as_str())).filter_map(|channel| {
+            let (row_group, number) = channel_dial(Some(channel), overrides.get(&channel.id));
+            (row_group != group && dial_pool(&row_group) == pool).then_some(number).flatten()
+        }));
         let mut slots: BTreeSet<i32> = current.channels.iter()
             .filter(|ch| current.tab.managed || overrides.get(&ch.id).is_some_and(|row| row.channel_number.is_some()))
             .filter_map(|ch| ch.channel_number).filter(|n| !reserved.contains(n)).collect();
@@ -2389,7 +2453,7 @@ mod tests {
     }
 
     #[test]
-    fn sports_extra_folders_have_independent_dials_and_bulk_selection() {
+    fn sports_extra_folders_share_the_country_run_and_bulk_selection() {
         use serde_json::json;
         let dir = temp_test_dir();
         let store = LineupStore::new(dir.0.clone(), test_clock(1000));
@@ -2411,8 +2475,9 @@ mod tests {
         let moved = store.set_override(serde_json::from_value(json!({
             "channelId":"three", "moveToPosition":1
         })).unwrap()).unwrap();
-        assert_eq!(moved.channel_number, Some(101));
-        assert_eq!(store.get_override("one").unwrap().channel_number, Some(102));
+        // League Two holds 101 in the same GB run, so League One steps round it.
+        assert_eq!(moved.channel_number, Some(102));
+        assert_eq!(store.get_override("one").unwrap().channel_number, Some(103));
         assert!(store.get_override("two").is_none());
         assert!(store.get_override("four").is_none());
     }
@@ -2725,6 +2790,88 @@ mod tests {
         assert_eq!(number("darts_1"), Some(3000));
     }
 
+    /// Each country's Sports Extra is one run from 2000 across its folders: GB 2000 on, AU 2000 on.
+    #[test]
+    fn sports_extra_is_one_run_per_country_across_folders() {
+        use serde_json::json;
+        let dir = temp_test_dir();
+        let store = LineupStore::new(dir.0.clone(), test_clock(1000));
+        store.report_channels(serde_json::from_value(json!([
+            {"id":"gb_snooker", "name":"Snooker One", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Snooker"},
+            {"id":"gb_darts_1", "name":"Darts TV", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+            {"id":"gb_darts_2", "name":"Darts Two", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+            {"id":"au_afl", "name":"AFL Extra", "countryCode":"AU", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"AFL"},
+            {"id":"au_nrl", "name":"NRL Extra", "countryCode":"AU", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"NRL"}
+        ])).unwrap()).unwrap();
+        store.assign_channel_numbers(AssignNumbersRequest {
+            country_code: None, group: None, start_number: None, overwrite_existing: None, order: Some("name".into()),
+        }).unwrap();
+        let number = |id: &str| store.get_override(id).and_then(|row| row.channel_number);
+        // Folders A to Z: Darts, then Snooker.
+        assert_eq!(number("gb_darts_1"), Some(2000));
+        assert_eq!(number("gb_darts_2"), Some(2001));
+        assert_eq!(number("gb_snooker"), Some(2002));
+        assert_eq!(number("au_afl"), Some(2000));
+        assert_eq!(number("au_nrl"), Some(2001));
+
+        // Renumbering one folder goes round the other folders' numbers in its country.
+        store.assign_channel_numbers(AssignNumbersRequest {
+            country_code: Some("GB".into()), group: Some("SPORT_EXTRA::Snooker".into()), start_number: None,
+            overwrite_existing: Some(true), order: None,
+        }).unwrap();
+        assert_eq!(number("gb_snooker"), Some(2002));
+
+        // A channel that arrives later in another folder takes the next free number in the run.
+        store.report_channels(serde_json::from_value(json!([
+            {"id":"gb_rally", "name":"Rally TV", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Rally"}
+        ])).unwrap()).unwrap();
+        store.assign_channel_numbers(AssignNumbersRequest {
+            country_code: Some("GB".into()), group: Some("SPORT_EXTRA::Rally".into()), start_number: None,
+            overwrite_existing: None, order: None,
+        }).unwrap();
+        assert_eq!(number("gb_rally"), Some(2003));
+
+        // Ordering a folder's tab keeps clear of the other folders too.
+        let tab = TabRef { country: "GB".into(), group: "SPORT_EXTRA".into(), folder: Some("Rally".into()) };
+        store.set_tab_order(&tab, &["gb_rally".into()]).unwrap();
+        assert_eq!(number("gb_rally"), Some(2003));
+    }
+
+    /// The lists already saved are renumbered once at start-up into per-country runs from 2000,
+    /// in their current order, and a hand edit afterwards survives a restart.
+    #[test]
+    fn existing_sports_extra_numbers_move_to_2000_once() {
+        use serde_json::json;
+        let dir = temp_test_dir();
+        {
+            let store = LineupStore::new(dir.0.clone(), test_clock(1000));
+            store.report_channels(serde_json::from_value(json!([
+                {"id":"darts_1", "name":"Darts TV", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+                {"id":"darts_2", "name":"Darts Two", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Darts"},
+                {"id":"snooker", "name":"Snooker One", "countryCode":"GB", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"Snooker"},
+                {"id":"au_afl", "name":"AFL Extra", "countryCode":"AU", "aurelisCategory":"SPORT_EXTRA", "sportsExtraGroup":"AFL"},
+                {"id":"news", "name":"Sky News", "countryCode":"GB", "aurelisCategory":"NEWS"}
+            ])).unwrap()).unwrap();
+            // Numbers saved by an older Companion: every folder from 101, Darts Two first.
+            for (id, number) in [("darts_2", 101), ("darts_1", 102), ("snooker", 101), ("au_afl", 1), ("news", 101)] {
+                store.set_override(serde_json::from_value(json!({"channelId": id, "channelNumber": number})).unwrap()).unwrap();
+            }
+            std::fs::remove_file(dir.0.join(SPORTS_EXTRA_RUNS_FILE)).unwrap();
+        }
+        let store = LineupStore::new(dir.0.clone(), test_clock(2000));
+        let number = |store: &LineupStore, id: &str| store.get_override(id).and_then(|row| row.channel_number);
+        assert_eq!(number(&store, "darts_2"), Some(2000), "current order kept");
+        assert_eq!(number(&store, "darts_1"), Some(2001));
+        assert_eq!(number(&store, "snooker"), Some(2002));
+        assert_eq!(number(&store, "au_afl"), Some(2000));
+        assert_eq!(number(&store, "news"), Some(101), "the main dial is not touched");
+
+        store.set_override(serde_json::from_value(json!({"channelId": "snooker", "channelNumber": 2050})).unwrap()).unwrap();
+        drop(store);
+        let again = LineupStore::new(dir.0.clone(), test_clock(3000));
+        assert_eq!(number(&again, "snooker"), Some(2050), "runs once, never undoing a later edit");
+    }
+
     /// A Sports Extra bank that only the televisions reported (no folder of the household's own).
     /// Renaming it from the editor must move its channels and show the new name everywhere.
     #[test]
@@ -2757,14 +2904,14 @@ mod tests {
             {"id":"other", "name":"Sky News", "countryCode":"GB", "aurelisCategory":"NEWS"}
         ])).unwrap()).unwrap();
 
-        // Parent folder "SPORT_EXTRA::EFL" matches both EFL sub-folders, numbering each independently.
+        // Parent folder "SPORT_EXTRA::EFL" matches both EFL sub-folders, numbered as one run, folder by folder.
         assert_eq!(store.assign_channel_numbers(AssignNumbersRequest {
             country_code: Some("GB".into()), group: Some("SPORT_EXTRA::EFL".into()),
             start_number: Some(101), overwrite_existing: None, order: None,
         }).unwrap(), 3);
         assert_eq!(store.get_override("l1_a").unwrap().channel_number, Some(101));
         assert_eq!(store.get_override("l1_b").unwrap().channel_number, Some(102));
-        assert_eq!(store.get_override("l2_a").unwrap().channel_number, Some(101));
+        assert_eq!(store.get_override("l2_a").unwrap().channel_number, Some(103));
         assert!(store.get_override("other").is_none());
 
         // Moving sets position; overwrite auto-assign clears stale manual positions.

@@ -646,7 +646,7 @@ pub fn render_lineup_with_flash(
             h.push_str(&format!("<option value=\"{key}\">{}</option>", escape(label)));
         }
         h.push_str("</select></label>");
-        h.push_str("<label>Start #: <input type=\"number\" name=\"start_number\" placeholder=\"101\" size=\"5\"></label> ");
+        h.push_str("<label>Start #: <input type=\"number\" name=\"start_number\" placeholder=\"usual\" title=\"Blank: 101 in GB and IE, 1 elsewhere; Sports Extra from 2000 in every country, one run across its folders\" size=\"7\"></label> ");
         h.push_str("<label><input type=\"checkbox\" name=\"overwrite\" value=\"true\"> Overwrite existing numbers</label> ");
         h.push_str("<button type=\"submit\" class=\"btn-save\">Auto-Assign Numbers</button>");
         h.push_str("<small>Keep the current order renumbers without moving anything. Name A to Z re-sorts the whole group.</small>");
