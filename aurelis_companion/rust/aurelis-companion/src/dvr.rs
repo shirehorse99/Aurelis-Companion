@@ -478,7 +478,7 @@ pub async fn run_dvr_scheduler(state: Arc<AppState>) {
 const CAPTURE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Waits between reconnects (the last repeats) so a dead provider is not hammered.
-const CAPTURE_RETRY_WAITS_S: &[u64] = &[2, 5, 10, 20, 30];
+const CAPTURE_RETRY_WAITS_S: &[u64] = &[5, 15, 30, 60];
 /// More time than this missing in drops marks the recording Partial rather than Finished.
 const CAPTURE_GAP_PARTIAL_MS: i64 = 60_000;
 

@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::lineup::{self, twin_name_key, LineupStore, SaveOverrideRequest, TabRef, TabView};
+use crate::lineup::{self, LineupStore, SaveOverrideRequest, TabRef, TabView};
 use crate::state::AppState;
 use crate::status_page::{escape, PRODUCT_NAME};
 
@@ -414,6 +414,7 @@ pub fn page_query(raw: &str) -> PageQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lineup::twin_name_key;
     use axum::body::{to_bytes, Body};
     use axum::http::Request as HttpRequest;
     use tower::ServiceExt;

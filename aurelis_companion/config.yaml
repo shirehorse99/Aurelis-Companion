@@ -1,6 +1,6 @@
 name: "Aurelis Companion"
 slug: aurelis_companion
-version: "0.1.19"
+version: "0.1.21"
 description: "A helper server for Aurelis TV boxes: shares AI answers and guide downloads across your household."
 arch:
   - amd64
@@ -35,6 +35,7 @@ options:
   disk_budget_mb: 0
   ai_runner: true
   betfair_relay: true
+  stream_relay: true
   tuner: true
 schema:
   pictures: bool
@@ -42,4 +43,5 @@ schema:
   disk_budget_mb: int(0,)
   ai_runner: bool
   betfair_relay: bool
+  stream_relay: bool
   tuner: bool

@@ -29,6 +29,22 @@ pub const REFUSALS_TO_STEP_ASIDE: usize = 3;
 /// How long the relay stays aside after the last refusal before televisions may try it again.
 pub const STEP_ASIDE_MS: i64 = 6 * 3600 * 1000;
 
+// The relay must never hammer a provider (owner, 26 Nov 2026). Every upstream request is one of the
+// household's few provider connections (1-2 on these accounts), and a provider at its limit answers
+// every extra one with a refusal, so retrying is what keeps it refusing.
+/// After a provider refuses, it is not asked again for this long; doubled per refusal in a row.
+pub const HOST_COOLDOWN_MS: i64 = 60_000;
+pub const HOST_COOLDOWN_MAX_MS: i64 = 10 * 60_000;
+/// The most upstream connections the relay holds to one provider at once.
+pub const MAX_UPSTREAM_PER_HOST: usize = 2;
+/// Waits before each reconnect after a flowing stream drops, in seconds; then the relay stops.
+pub const RECONNECT_WAITS_S: [u64; 3] = [2, 5, 10];
+
+/// The provider a stream belongs to, by host name.
+pub fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).unwrap_or_default()
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 pub struct ActiveRelay {
@@ -72,6 +88,8 @@ pub struct StreamRelayManager {
     last_success_ms: AtomicI64,
     /// Where the refusals are kept, so a restart does not offer a refused relay again.
     refusals_file: Option<std::path::PathBuf>,
+    /// Per provider host: not to be asked again before this time, and refusals in a row.
+    cooldowns: std::sync::Mutex<HashMap<String, (i64, u32)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,7 +176,32 @@ impl StreamRelayManager {
             refusals: std::sync::Mutex::new(refusals),
             last_success_ms: AtomicI64::new(last_success),
             refusals_file,
+            cooldowns: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Why this provider must not be asked now, or `None`.
+    pub fn cooldown_reason(&self, host: &str) -> Option<String> {
+        let now = (self.wall)();
+        let map = self.cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+        let (until, streak) = *map.get(host)?;
+        (until > now).then(|| format!(
+            "{host} refused the Companion {streak} time{} in a row; not asking it again for {} s",
+            if streak == 1 { "" } else { "s" }, (until - now + 999) / 1000,
+        ))
+    }
+
+    fn note_host_refusal(&self, host: &str) {
+        let now = (self.wall)();
+        let mut map = self.cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(host.to_string()).or_insert((0, 0));
+        entry.1 += 1;
+        let wait = (HOST_COOLDOWN_MS << (entry.1 - 1).min(8)).min(HOST_COOLDOWN_MAX_MS);
+        entry.0 = now + wait;
+    }
+
+    fn note_host_success(&self, host: &str) {
+        self.cooldowns.lock().unwrap_or_else(|e| e.into_inner()).remove(host);
     }
 
     fn save_refusals(&self, list: &VecDeque<(i64, String)>) {
@@ -254,6 +297,16 @@ impl StreamRelayManager {
                 if let Some(r) = write.get(&key) {
                     r.clone()
                 } else {
+                    // A new upstream connection: never to a provider that just refused, and never
+                    // more than MAX_UPSTREAM_PER_HOST to one provider. The television goes direct.
+                    let host = host_of(upstream_url);
+                    if let Some(why) = self.cooldown_reason(&host) {
+                        return Err(why);
+                    }
+                    let held = write.values().filter(|r| host_of(&r.upstream_url) == host).count();
+                    if held >= MAX_UPSTREAM_PER_HOST {
+                        return Err(format!("the Companion already holds {held} connections to {host}; play this one directly"));
+                    }
                     let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
                     let (stop_tx, stop_rx) = watch::channel(false);
                     let now = (self.wall)();
@@ -378,11 +431,26 @@ async fn run_upstream_ingest(
     relay: Arc<ActiveRelay>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
-    let mut backoff_ms = 500u64;
     let mut reconnects = 0u32;
     let mut why_stopped: Option<String> = None;
+    let host = host_of(&relay.upstream_url);
 
     'outer: loop {
+        if reconnects > 0 {
+            // A pause before every reconnect, longer each time; never straight back.
+            let Some(wait) = RECONNECT_WAITS_S.get(reconnects as usize - 1) else { break 'outer };
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(*wait)) => {},
+                _ = stop_rx.changed() => break 'outer,
+            }
+            if relay.active_subscribers.load(Ordering::Relaxed) == 0 && !relay.has_paused_subscriber.load(Ordering::Relaxed) {
+                break 'outer;
+            }
+        }
+        if let Some(why) = manager.cooldown_reason(&host) {
+            why_stopped = Some(why);
+            break 'outer;
+        }
         let req = manager.client.get(&relay.upstream_url)
             .header("User-Agent", "VLC/3.0.18 LibVLC/3.0.18")
             .header("Accept", "*/*");
@@ -399,27 +467,15 @@ async fn run_upstream_ingest(
                 // Before any bytes, a refusal is final: the televisions go direct at once rather
                 // than wait while the relay knocks on the provider (a refused provider is often
                 // one at its connection limit, and every retry is another connection).
-                reconnects += 1;
-                if relay.upstream_bytes_received.load(Ordering::Relaxed) == 0 || reconnects > MAX_RECONNECTS {
-                    if relay.upstream_bytes_received.load(Ordering::Relaxed) == 0 {
-                        manager.note_refusal(&why);
-                    }
-                    why_stopped = Some(why);
-                    break 'outer;
+                manager.note_host_refusal(&host);
+                if relay.upstream_bytes_received.load(Ordering::Relaxed) == 0 {
+                    manager.note_refusal(&why);
                 }
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {},
-                    _ = stop_rx.changed() => break 'outer,
-                }
-                backoff_ms = (backoff_ms * 2).min(5000);
-                if relay.active_subscribers.load(Ordering::Relaxed) == 0 && !relay.has_paused_subscriber.load(Ordering::Relaxed) {
-                    break 'outer;
-                }
-                continue 'outer;
+                why_stopped = Some(why);
+                break 'outer;
             }
         };
 
-        backoff_ms = 500;
         let mut stream = resp.bytes_stream();
         let mut idle_since: Option<Instant> = None;
 
@@ -434,6 +490,7 @@ async fn run_upstream_ingest(
                             let len = chunk.len();
                             if relay.upstream_bytes_received.load(Ordering::Relaxed) == 0 {
                                 manager.note_success();
+                                manager.note_host_success(&host);
                             }
                             relay.upstream_bytes_received.fetch_add(len as u64, Ordering::Relaxed);
                             relay.last_chunk_at_ms.store((manager.wall)(), Ordering::Relaxed);
@@ -545,6 +602,11 @@ pub async fn live_relay_route(
 ) -> Response {
     if !state.config.stream_relay {
         return (StatusCode::SERVICE_UNAVAILABLE, "stream relay is disabled").into_response();
+    }
+    // A television that has not re-read the card since the relay stepped aside is answered here,
+    // without the provider being asked.
+    if let Some(why) = state.stream_relay.stepped_aside() {
+        return (StatusCode::SERVICE_UNAVAILABLE, format!("Companion relay: {why}")).into_response();
     }
 
     let (url_opt, channel_id, channel_name, token_opt, expires_opt) = parse_relay_query(req.uri().query());
@@ -949,7 +1011,15 @@ mod tests {
     }
 
     async fn upstream(status: u16, seconds: u64) -> String {
-        let app = axum::Router::new().route("/live.ts", axum::routing::get(move || async move {
+        upstream_counted(status, seconds).await.0
+    }
+
+    async fn upstream_counted(status: u16, seconds: u64) -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = axum::Router::new().route("/live.ts", axum::routing::get(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async move {
             if status != 200 {
                 return (StatusCode::from_u16(status).unwrap(), "nope").into_response();
             }
@@ -960,11 +1030,47 @@ mod tests {
                 Some((Ok::<_, std::io::Error>(Bytes::from(vec![0x47u8; 1880])), ()))
             });
             Body::from_stream(body).into_response()
-        }));
+        }}));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}/live.ts")
+        (format!("http://{addr}/live.ts"), hits)
+    }
+
+    fn movable_clock() -> (crate::state::WallClock, Arc<AtomicI64>) {
+        let now = Arc::new(AtomicI64::new(crate::state::now_ms()));
+        let c = now.clone();
+        (Arc::new(move || c.load(Ordering::SeqCst)), now)
+    }
+
+    /// Owner, 26 Nov 2026: "stream relay must never hammer the server".
+    #[tokio::test]
+    async fn ten_quick_zaps_to_a_refusing_provider_ask_it_once() {
+        let (url, hits) = upstream_counted(502, 0).await;
+        let mgr = StreamRelayManager::new(Arc::new(crate::state::now_ms), None, false, 0);
+        let (_, _, guard) = mgr.subscribe(&url, None, None).await.unwrap();
+        let mut stopped = guard.relay.stop_tx.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), stopped.changed()).await.unwrap().unwrap();
+        drop(guard);
+        for _ in 0..9 {
+            let why = mgr.subscribe(&url, None, None).await.err().expect("refused without asking");
+            assert!(why.contains("not asking it again"), "{why}");
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the provider was asked once");
+    }
+
+    #[tokio::test]
+    async fn never_more_than_two_connections_to_one_provider() {
+        let (url, hits) = upstream_counted(200, 30).await;
+        let mgr = StreamRelayManager::new(Arc::new(crate::state::now_ms), None, false, 0);
+        let (_, _, a) = mgr.subscribe(&format!("{url}?a"), None, None).await.unwrap();
+        let (_, _, b) = mgr.subscribe(&format!("{url}?b"), None, None).await.unwrap();
+        let third = mgr.subscribe(&format!("{url}?c"), None, None).await.err().expect("third refused");
+        assert!(third.contains("already holds 2 connections"), "{third}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        drop((a, b));
     }
 
     /// 26 Nov 2026: a refused provider kept the relay retrying while every television buffered.
@@ -1007,12 +1113,14 @@ mod tests {
     #[tokio::test]
     async fn the_relay_steps_aside_after_three_refusals_and_says_why() {
         let url = upstream(502, 0).await;
-        let mgr = StreamRelayManager::new(std::sync::Arc::new(crate::state::now_ms), None, false, 0);
+        let (wall, now) = movable_clock();
+        let mgr = StreamRelayManager::new(wall, None, false, 0);
         for n in 1..=3 {
             assert!(mgr.stepped_aside().is_none(), "not after {} refusals", n - 1);
             let (_, _, guard) = mgr.subscribe(&url, None, None).await.unwrap();
             let mut stopped = guard.relay.stop_tx.subscribe();
             tokio::time::timeout(Duration::from_secs(3), stopped.changed()).await.unwrap().unwrap();
+            now.fetch_add(HOST_COOLDOWN_MAX_MS + 1, Ordering::SeqCst); // past the cool-down
         }
         let why = mgr.stepped_aside().expect("aside after three");
         assert!(why.contains("502") && why.contains("3 times"), "{why}");
@@ -1025,12 +1133,13 @@ mod tests {
     async fn stepping_aside_survives_a_restart() {
         let dir = crate::household::TempDir::new();
         let url = upstream(502, 0).await;
-        let wall: crate::state::WallClock = std::sync::Arc::new(crate::state::now_ms);
+        let (wall, now) = movable_clock();
         let mgr = StreamRelayManager::new(wall.clone(), Some(dir.0.clone()), false, 0);
         for _ in 0..3 {
             let (_, _, guard) = mgr.subscribe(&url, None, None).await.unwrap();
             let mut stopped = guard.relay.stop_tx.subscribe();
             tokio::time::timeout(Duration::from_secs(3), stopped.changed()).await.unwrap().unwrap();
+            now.fetch_add(HOST_COOLDOWN_MAX_MS + 1, Ordering::SeqCst);
         }
         assert!(mgr.stepped_aside().is_some());
         let again = StreamRelayManager::new(wall, Some(dir.0.clone()), false, 0);

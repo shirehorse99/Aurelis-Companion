@@ -23,6 +23,12 @@ television boxes share work. It does six things:
   `off`); the boxes then call Betfair themselves, as before. Pausing the Companion pauses it too.
   A wrong Betfair password may be tried once on each path (direct and via the Companion) per 30
   minutes: that is by design, so that a VPN refusal on one path never blocks a relayed login.
+* **Relays live channels (optional).** A television can play a channel through the Companion, so
+  boxes watching the same channel share one connection to your provider. This only helps when the
+  Companion can reach your provider itself: if your televisions use a VPN the Companion is not on,
+  the provider may refuse it. When it refuses three times in a row the Companion stops offering the
+  relay for six hours and says why on its status page, and the televisions play directly. To stop
+  it altogether, set the `stream_relay` option to `false`.
 * **Downloads guides once.** It fetches your guide (XMLTV) files itself, on their own schedule, and
   hands the copy to each box, so the boxes do not each download the same large file.
 * **Keeps a copy of the master television's household settings.** The master box puts its settings
