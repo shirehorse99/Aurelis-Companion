@@ -391,6 +391,22 @@ fn row_save_request(form: &std::collections::HashMap<String, String>, suffix: &s
     })
 }
 
+/// Make a row's save to the other ids of the same channel. A move renumbers the lead's group;
+/// its twins then take the lead's new dial number, so the channel keeps one place.
+fn copy_to_twins(state: &AppState, req: &lineup::SaveOverrideRequest, twins: &[String]) -> Result<(), String> {
+    for twin in twins {
+        let mut copy = req.clone();
+        copy.channel_id = twin.clone();
+        if req.move_to_position.is_some() {
+            copy.move_to_position = None;
+            copy.clear_channel_number = false;
+            copy.channel_number = state.lineup.get_override(&req.channel_id).and_then(|row| row.channel_number);
+        }
+        state.lineup.save_override(copy).map_err(|e| format!("not copied to its twin: {e}"))?;
+    }
+    Ok(())
+}
+
 async fn ui_save_channel_override(
     State(state): State<Arc<AppState>>,
     peer: Option<ConnectInfo<SocketAddr>>,
@@ -410,7 +426,11 @@ async fn ui_save_channel_override(
     let ch_id = req.channel_id.clone();
     let move_to_position = req.move_to_position;
     let row_edit = req.row_edit;
-    if let Err(e) = state.lineup.set_override(req) {
+    let twins = state.lineup.twin_ids_of(&ch_id);
+    if let Err(e) = state.lineup.set_override(req.clone()) {
+        return ui_error_or_redirect(&state, &headers, &dest, e);
+    }
+    if let Err(e) = copy_to_twins(&state, &req, &twins) {
         return ui_error_or_redirect(&state, &headers, &dest, e);
     }
     let ch_name = state.lineup.channel_display_name(&ch_id);
@@ -469,6 +489,7 @@ async fn ui_save_channel_rows(
     let single_row = single.is_some();
     let mut saved: Vec<(String, Option<usize>)> = Vec::new();
     let mut last_errors: Vec<(String, String)> = Vec::new();
+    let mut twin_errors: Vec<(String, String)> = Vec::new();
     while !pending.is_empty() {
         let mut progress = false;
         last_errors.clear();
@@ -476,9 +497,13 @@ async fn ui_save_channel_rows(
         for req in pending {
             let id = req.channel_id.clone();
             let moved = req.move_to_position;
+            let twins = state.lineup.twin_ids_of(&id);
             match state.lineup.save_override(req.clone()) {
                 Ok((_, changed)) => {
                     progress = true;
+                    if let Err(e) = copy_to_twins(&state, &req, &twins) {
+                        twin_errors.push((id.clone(), e));
+                    }
                     if changed {
                         saved.push((id, moved));
                     }
@@ -492,6 +517,7 @@ async fn ui_save_channel_rows(
         pending = if progress { retry } else { Vec::new() };
     }
     failed.extend(last_errors);
+    failed.extend(twin_errors);
 
     let name = |id: &str| state.lineup.channel_display_name(id);
     if !saved.is_empty() {
@@ -581,6 +607,9 @@ async fn ui_delete_channel_override(
     if let Some(ch_id) = form.get("channel_id") {
         let name = state.lineup.channel_display_name(ch_id);
         anchor = Some(status_page::row_anchor_id(ch_id));
+        for twin in state.lineup.twin_ids_of(ch_id) {
+            let _ = state.lineup.delete_override(&twin);
+        }
         if matches!(state.lineup.delete_override(ch_id), Ok(true)) {
             notice = format!("Reset overrides for {name}.");
         }
@@ -671,6 +700,10 @@ async fn ui_bulk_channel_override(
         }
         _ => return ui_error_or_redirect(&state, &headers, &dest, "Choose a valid bulk action."),
     };
+    // A folded row stands for every id of its channel.
+    let mut channel_ids = channel_ids;
+    let twins: Vec<String> = channel_ids.iter().flat_map(|id| state.lineup.twin_ids_of(id)).collect();
+    channel_ids.extend(twins);
     match state.lineup.bulk_update(lineup::BulkOverrideRequest { channel_ids, action }) {
         Ok(0) => redirect_with_flash(&state, &dest, state::FlashKind::Success, "Selected channels already matched that state.", None),
         Ok(count) => {

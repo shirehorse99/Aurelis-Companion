@@ -43,8 +43,8 @@ fn channel_json(ch: &lineup::ChannelSummary, view: &TabView) -> Value {
     let same_box = ch.reported_by.is_some() && twins.iter().any(|t| t.reported_by == ch.reported_by);
     json!({
         "by": ch.reported_by,
-        // Local and Regional channels are listed inside Entertainment, as the televisions draw them.
-        "kind": Some(lineup::resolve_aurelis_category(ch)).filter(|k| matches!(*k, "Local" | "Regional")),
+        // Local channels are listed inside Entertainment, as the televisions draw them.
+        "kind": Some(lineup::resolve_aurelis_category(ch)).filter(|k| *k == "Local"),
         "twins": twins.iter().map(|t| json!({ "id": t.id, "by": t.reported_by, "provider": t.original_genre.as_deref().or(t.genre.as_deref()) })).collect::<Vec<_>>(),
         "sameBox": same_box,
         "id": ch.id,

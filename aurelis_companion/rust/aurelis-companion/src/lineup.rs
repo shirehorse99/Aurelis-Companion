@@ -455,15 +455,15 @@ impl std::fmt::Display for DialGroup {
     }
 }
 
-/// The television tab a group is drawn in. A television's Entertainment tab carries the Local and
-/// Regional channels too (`EpgGroupFilter.isLocalOrRegionalForUser`), with the Local and Regional
-/// tabs as slices of it. Numbered apart, the two lists interleaved on screen: Local's first place
-/// beside Entertainment's first, and the same dial number twice in one tab (owner, 25 Nov 2026:
-/// "local and entertainment mixed and not following channel positions and numbers"). So they are
-/// ordered and numbered as one list.
+/// The television tab a group is drawn in. A television's Entertainment tab carries the viewer's
+/// own Local channels (`EpgGroupFilter.isLocalOrRegionalForUser`). Numbered apart, the two lists
+/// interleaved on screen: Local's first place beside Entertainment's first, and the same dial
+/// number twice in one tab (owner, 25 Nov 2026). So Local is ordered and numbered inside
+/// Entertainment. Regional (other regions' editions) has a tab of its own on a television with a
+/// postcode, so it keeps its own group here (owner, 26 Nov 2026).
 pub fn tab_category(label: &'static str) -> &'static str {
     match label {
-        "Local" | "Regional" => "Entertainment",
+        "Local" => "Entertainment",
         other => other,
     }
 }
@@ -1451,6 +1451,16 @@ impl LineupStore {
         self.persist_overrides(&updated)?;
         *lock = updated;
         Ok(true)
+    }
+
+    /// The other ids of the same channel (same name, same tab): see [`TabView::twins`]. The
+    /// Spreadsheet view's saves, resets and bulk changes reach them too.
+    pub fn twin_ids_of(&self, id: &str) -> Vec<String> {
+        let channels = self.channels.lock().unwrap();
+        let overrides = self.overrides.lock().unwrap();
+        let mut ids: Vec<String> = twin_ids(&channels, &overrides, id, overrides.get(id)).into_iter().collect();
+        ids.sort();
+        ids
     }
 
     /// Each reported channel's own number, as a television sent it, before any override.
@@ -2998,4 +3008,42 @@ mod tests {
         assert_eq!(ids, ["kept"]);
         assert!(store.get_override("old").is_some(), "its override waits for the channel to return");
     }
+
+    /// 26 Nov 2026: the Spreadsheet view listed every id of a channel, and Regional had been
+    /// folded into Entertainment though a television gives it a tab of its own.
+    #[tokio::test]
+    async fn the_spreadsheet_folds_twins_and_regional_keeps_its_own_group() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use serde_json::json;
+        use tower::ServiceExt;
+        use crate::state::{test_config, test_state};
+        let dir = temp_test_dir();
+        let mut config = test_config();
+        config.data_dir = dir.0.clone();
+        let state = Arc::new(test_state(config));
+        state.lineup.report_channels(serde_json::from_value(json!([
+            {"id":"a", "name":"BBC One", "countryCode":"GB", "aurelisCategory":"ENTERTAINMENT"},
+            {"id":"b", "name":"BBC ONE", "countryCode":"GB", "aurelisCategory":"ENTERTAINMENT"},
+            {"id":"w", "name":"BBC One Wales", "countryCode":"GB", "aurelisCategory":"LOCAL"},
+            {"id":"r", "name":"BBC One Yorkshire", "countryCode":"GB", "aurelisCategory":"REGIONAL"}
+        ])).unwrap()).unwrap();
+        assert_eq!(dial_group(&state.lineup.get_channels().into_iter().find(|c| c.id == "w").unwrap()).category, "Entertainment");
+        assert_eq!(dial_group(&state.lineup.get_channels().into_iter().find(|c| c.id == "r").unwrap()).category, "Regional");
+
+        let html = crate::status_page::render_lineup(&state.page_view(), &state.lineup, true, &ChannelQuery::default());
+        assert_eq!(html.matches("name=\"channel_ids\"").count(), 3, "BBC One's two ids are one row");
+        assert!(html.contains(">2 ids</span>"));
+
+        // Hiding the folded row hides both ids.
+        let app = crate::router(state.clone());
+        let lead = if html.contains("value=\"a\" aria-label=\"Select BBC One\"") || html.contains("value=\"a\"") { "a" } else { "b" };
+        let r = app.oneshot(Request::builder().method("POST").uri("/ui/bulk_channel_override")
+            .extension(axum::extract::ConnectInfo("127.0.0.1:8765".parse::<std::net::SocketAddr>().unwrap()))
+            .body(Body::from(format!("bulk_action=hide&channel_ids={lead}&redirect_to=lineup"))).unwrap()).await.unwrap();
+        assert_eq!(r.status(), StatusCode::SEE_OTHER);
+        assert_eq!(state.lineup.get_override("a").and_then(|o| o.hidden), Some(true));
+        assert_eq!(state.lineup.get_override("b").and_then(|o| o.hidden), Some(true));
+    }
 }
+

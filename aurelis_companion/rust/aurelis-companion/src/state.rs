@@ -244,7 +244,7 @@ impl AppState {
         apply_betfair_relay(&mut card, self.config.betfair_relay, inner.paused);
         apply_dvr(&mut card, self.config.dvr_enabled, inner.paused, &inner.facts);
         apply_stage(&mut card, self.config.stage_enabled, inner.paused, &inner.facts);
-        apply_stream_relay(&mut card, self.config.stream_relay, inner.paused);
+        apply_stream_relay(&mut card, self.config.stream_relay, inner.paused, self.stream_relay.stepped_aside());
         apply_timeshift(&mut card, self.config.timeshift_enabled, inner.paused);
         apply_transcode(&mut card, self.config.transcode_enabled, inner.paused);
         apply_tuner(&mut card, self.config.tuner_enabled, inner.paused);
@@ -284,7 +284,7 @@ impl AppState {
                 apply_betfair_relay(&mut card, self.config.betfair_relay, inner.paused);
                 apply_dvr(&mut card, self.config.dvr_enabled, inner.paused, &inner.facts);
                 apply_stage(&mut card, self.config.stage_enabled, inner.paused, &inner.facts);
-                apply_stream_relay(&mut card, self.config.stream_relay, inner.paused);
+                apply_stream_relay(&mut card, self.config.stream_relay, inner.paused, self.stream_relay.stepped_aside());
                 apply_timeshift(&mut card, self.config.timeshift_enabled, inner.paused);
                 apply_transcode(&mut card, self.config.transcode_enabled, inner.paused);
                 apply_tuner(&mut card, self.config.tuner_enabled, inner.paused);
@@ -652,13 +652,16 @@ fn apply_stage(card: &mut Card, enabled: bool, paused: bool, facts: &HostFacts) 
 
 pub const STREAM_RELAY_OFF_REASON: &str = "switched off in the Companion's options (stream_relay)";
 
-fn apply_stream_relay(card: &mut Card, enabled: bool, paused: bool) {
+fn apply_stream_relay(card: &mut Card, enabled: bool, paused: bool, stepped_aside: Option<String>) {
     if !enabled {
         card.capabilities.stream_relay = false;
         card.declined.insert("streamRelay".to_string(), STREAM_RELAY_OFF_REASON.to_string());
     } else if paused {
         card.capabilities.stream_relay = false;
         card.declined.insert("streamRelay".to_string(), PAUSED_RUNNER_REASON.to_string());
+    } else if let Some(why) = stepped_aside {
+        card.capabilities.stream_relay = false;
+        card.declined.insert("streamRelay".to_string(), why);
     } else {
         card.capabilities.stream_relay = true;
         card.declined.remove("streamRelay");

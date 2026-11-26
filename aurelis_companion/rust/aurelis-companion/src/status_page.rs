@@ -523,6 +523,25 @@ pub fn render_lineup_with_flash(
         channels.retain(|ch| ch.channel_number.is_none());
     }
     lineup.sort_channels(&mut channels, query.sort.as_deref());
+    // The same channel under several ids (another box keyed it differently) is one row; its
+    // saves, resets and bulk changes reach every id.
+    let mut twin_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    {
+        let mut lead_of: std::collections::HashMap<(crate::lineup::DialGroup, String), String> = std::collections::HashMap::new();
+        channels.retain(|ch| {
+            let key = (crate::lineup::dial_group(ch), crate::lineup::twin_name_key(&ch.name));
+            match lead_of.get(&key) {
+                Some(lead) => {
+                    *twin_counts.entry(lead.clone()).or_insert(1) += 1;
+                    false
+                }
+                None => {
+                    lead_of.insert(key, ch.id.clone());
+                    true
+                }
+            }
+        });
+    }
 
     let page_href = |p: Option<usize>| -> String {
         let mut params: Vec<String> = vec!["view=table".to_string()];
@@ -877,11 +896,10 @@ pub fn render_lineup_with_flash(
                 } else {
                     String::new()
                 };
-                let edited_badge = if has_override {
-                    "<span class=\"badge edited\">Edited</span>"
-                } else {
-                    ""
-                };
+                let edited_badge = format!("{}{}",
+                    if has_override { "<span class=\"badge edited\">Edited</span>" } else { "" },
+                    twin_counts.get(&ch.id).map(|n| format!("<span class=\"badge\" title=\"The same channel under {n} ids; changes here reach all of them\">{n} ids</span>")).unwrap_or_default(),
+                );
                 let logo_override = channel_override.as_ref().and_then(|row| row.logo_url.as_deref()).unwrap_or("");
                 let logo_summary = if logo_override.is_empty() {
                     "Channel logo"
